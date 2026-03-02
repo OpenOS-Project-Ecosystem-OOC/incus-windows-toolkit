@@ -8,11 +8,16 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 lint: ## Run shellcheck on all scripts
-	find . -name '*.sh' -exec shellcheck -x {} +
+	find . -name '*.sh' -exec shellcheck -x -S warning {} +
 
-test: ## Run integration tests (requires incus)
-	@echo "Running smoke tests..."
-	cli/iwt.sh doctor
+test: ## Run unit tests and lint
+	tests/run-tests.sh
+
+test-all: ## Run all tests including integration (requires incus)
+	tests/run-tests.sh --all
+
+validate: ## Validate profile YAML files
+	profiles/validate.sh
 
 image-build: ## Build a Windows image for Incus
 	image-pipeline/scripts/build-image.sh

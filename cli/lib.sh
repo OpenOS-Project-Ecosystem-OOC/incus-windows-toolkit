@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# Shared library for IWT scripts.
+# Source this file; do not execute directly.
+
+# --- Colors (auto-disable if not a terminal) ---
+
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' NC=''
+fi
+
+info()  { echo -e "${BLUE}::${NC} $*"; }
+ok()    { echo -e "${GREEN}OK${NC} $*"; }
+warn()  { echo -e "${YELLOW}WARNING${NC} $*" >&2; }
+err()   { echo -e "${RED}ERROR${NC} $*" >&2; }
+die()   { err "$@"; exit 1; }
+bold()  { echo -e "${BOLD}$*${NC}"; }
+
+# --- Progress ---
+
+# Simple step counter for multi-step operations
+_IWT_STEP=0
+_IWT_TOTAL_STEPS=0
+
+progress_init() {
+    _IWT_TOTAL_STEPS="$1"
+    _IWT_STEP=0
+}
+
+progress_step() {
+    _IWT_STEP=$((_IWT_STEP + 1))
+    info "[${_IWT_STEP}/${_IWT_TOTAL_STEPS}] $*"
+}
+
+# --- Dependency checking ---
+
+require_cmd() {
+    local missing=()
+    for cmd in "$@"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        err "Missing required commands: ${missing[*]}"
+        err ""
+        err "Install suggestions:"
+        for cmd in "${missing[@]}"; do
+            suggest_install "$cmd"
+        done
+        exit 1
+    fi
+}
+
+suggest_install() {
+    local cmd="$1"
+    local pkg=""
+    local note=""
+
+    case "$cmd" in
+        incus)
+            pkg="incus"
+            note="See https://linuxcontainers.org/incus/docs/main/installing/"
+            ;;
+        qemu-img)
+            pkg="qemu-utils (Debian/Ubuntu) or qemu-img (Fedora/RHEL)"
+            ;;
+        xfreerdp3|xfreerdp)
+            pkg="freerdp3-x11 (Debian/Ubuntu) or freerdp (Fedora/RHEL)"
+            ;;
+        wimlib-imagex)
+            pkg="wimtools (Debian/Ubuntu) or wimlib-utils (Fedora/RHEL)"
+            ;;
+        mkisofs)
+            pkg="genisoimage (Debian/Ubuntu) or mkisofs (Fedora/RHEL)"
+            note="Alternative: xorriso"
+            ;;
+        xorriso)
+            pkg="xorriso"
+            ;;
+        hivexsh|hivexregedit)
+            pkg="libhivex-bin (Debian/Ubuntu) or hivex (Fedora/RHEL)"
+            ;;
+        curl)
+            pkg="curl"
+            ;;
+        shellcheck)
+            pkg="shellcheck"
+            ;;
+        *)
+            pkg="$cmd"
+            ;;
+    esac
+
+    err "  $cmd -> install package: $pkg"
+    if [[ -n "$note" ]]; then
+        err "         $note"
+    fi
+}
+
+# --- Retry logic ---
+
+# Retry a command up to N times with exponential backoff.
+# Usage: retry 3 curl -fSL -o file url
+retry() {
+    local max_attempts="$1"
+    shift
+    local attempt=1
+    local delay=2
+
+    while true; do
+        if "$@"; then
+            return 0
+        fi
+
+        if [[ $attempt -ge $max_attempts ]]; then
+            err "Command failed after $max_attempts attempts: $*"
+            return 1
+        fi
+
+        warn "Attempt $attempt/$max_attempts failed, retrying in ${delay}s..."
+        sleep "$delay"
+        attempt=$((attempt + 1))
+        delay=$((delay * 2))
+    done
+}
+
+# --- File size formatting ---
+
+human_size() {
+    local bytes="$1"
+    if [[ $bytes -ge 1073741824 ]]; then
+        echo "$(( bytes / 1073741824 ))G"
+    elif [[ $bytes -ge 1048576 ]]; then
+        echo "$(( bytes / 1048576 ))M"
+    elif [[ $bytes -ge 1024 ]]; then
+        echo "$(( bytes / 1024 ))K"
+    else
+        echo "${bytes}B"
+    fi
+}
+
+# --- Config file support ---
+
+IWT_CONFIG_FILE="${IWT_CONFIG_FILE:-$HOME/.config/iwt/config}"
+
+# Load config file if it exists. Config is simple KEY=VALUE format.
+load_config() {
+    if [[ -f "$IWT_CONFIG_FILE" ]]; then
+        # Only source lines that look like safe variable assignments
+        while IFS='=' read -r key value; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$key" ]] && continue
+            key=$(echo "$key" | tr -d '[:space:]')
+            # Only allow IWT_ prefixed variables
+            if [[ "$key" =~ ^IWT_ ]]; then
+                export "$key=$value"
+            fi
+        done < "$IWT_CONFIG_FILE"
+    fi
+}
+
+# Write a default config file
+init_config() {
+    local config_dir
+    config_dir=$(dirname "$IWT_CONFIG_FILE")
+    mkdir -p "$config_dir"
+
+    if [[ -f "$IWT_CONFIG_FILE" ]]; then
+        info "Config already exists: $IWT_CONFIG_FILE"
+        return 0
+    fi
+
+    cat > "$IWT_CONFIG_FILE" <<'EOF'
+# IWT Configuration
+# Lines starting with # are comments.
+# Only IWT_ prefixed variables are loaded.
+
+# Default VM name
+IWT_VM_NAME=windows
+
+# RDP connection defaults
+IWT_RDP_PORT=3389
+IWT_RDP_USER=User
+IWT_RDP_PASS=
+
+# Default disk size for new images
+IWT_DISK_SIZE=64G
+
+# VirtIO driver cache directory (avoids re-downloading)
+IWT_CACHE_DIR=$HOME/.cache/iwt
+EOF
+
+    ok "Config created: $IWT_CONFIG_FILE"
+}
+
+# --- Cache directory ---
+
+IWT_CACHE_DIR="${IWT_CACHE_DIR:-$HOME/.cache/iwt}"
+
+ensure_cache_dir() {
+    mkdir -p "$IWT_CACHE_DIR"
+}
+
+# Download a file to cache if not already present.
+# Usage: cached_download URL FILENAME
+cached_download() {
+    local url="$1"
+    local filename="$2"
+    local dest="$IWT_CACHE_DIR/$filename"
+
+    ensure_cache_dir
+
+    if [[ -f "$dest" ]]; then
+        info "Using cached: $filename"
+        echo "$dest"
+        return 0
+    fi
+
+    info "Downloading: $filename"
+    retry 3 curl -fSL --progress-bar -o "$dest.tmp" "$url"
+    mv "$dest.tmp" "$dest"
+    echo "$dest"
+}
+
+# --- Architecture helpers ---
+
+detect_arch() {
+    local host_arch
+    host_arch=$(uname -m)
+    case "$host_arch" in
+        x86_64|amd64)  echo "x86_64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *)             echo "$host_arch" ;;
+    esac
+}
+
+arch_to_windows() {
+    case "$1" in
+        x86_64)  echo "amd64" ;;
+        arm64)   echo "arm64" ;;
+        *)       echo "$1" ;;
+    esac
+}
+
+arch_to_qemu() {
+    case "$1" in
+        x86_64)  echo "x86_64" ;;
+        arm64)   echo "aarch64" ;;
+        *)       echo "$1" ;;
+    esac
+}

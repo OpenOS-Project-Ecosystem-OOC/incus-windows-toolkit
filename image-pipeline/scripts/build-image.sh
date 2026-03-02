@@ -6,50 +6,63 @@
 #
 # Options:
 #   --iso PATH          Path to Windows ISO (required)
-#   --arch ARCH         Target architecture: x86_64 | arm64 (default: x86_64)
+#   --arch ARCH         Target architecture: x86_64 | arm64 (default: auto-detect)
 #   --edition EDITION   Windows edition to install (default: Pro)
 #   --slim              Strip bloatware packages (tiny11-style)
 #   --output PATH       Output image path (default: windows-<arch>.qcow2)
 #   --inject-drivers    Inject VirtIO + platform drivers into the image
 #   --woa-drivers PATH  Path to WOA-Drivers directory (ARM only)
 #   --size SIZE         Disk image size (default: 64G)
+#   --keep-work         Don't delete the work directory on exit
 #   --help              Show this help
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Find and source shared library
+IWT_ROOT="$(cd "$PIPELINE_DIR/.." && pwd)"
+source "$IWT_ROOT/cli/lib.sh"
+
 WORK_DIR=""
+KEEP_WORK=false
 
 # Defaults
-ARCH="x86_64"
+ARCH=""
 EDITION="Pro"
 SLIM=false
 INJECT_DRIVERS=true
 ISO_PATH=""
 OUTPUT=""
 WOA_DRIVERS=""
-DISK_SIZE="64G"
+DISK_SIZE="${IWT_DISK_SIZE:-64G}"
 
-# --- Helpers ---
+# Load user config if present
+load_config
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-info() { echo ":: $*"; }
-warn() { echo "WARNING: $*" >&2; }
+# --- Cleanup ---
 
 cleanup() {
+    # Unmount anything we may have left mounted
+    for mp in "$WORK_DIR"/iso_mount "$WORK_DIR"/wim_mount "$WORK_DIR"/virtio_mount; do
+        if [[ -n "$mp" ]] && mountpoint -q "$mp" 2>/dev/null; then
+            warn "Cleaning up stale mount: $mp"
+            sudo umount "$mp" 2>/dev/null || true
+        fi
+    done
+
+    if [[ "$KEEP_WORK" == true && -n "$WORK_DIR" ]]; then
+        info "Work directory preserved: $WORK_DIR"
+        return
+    fi
+
     if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
         info "Cleaning up work directory"
         rm -rf "$WORK_DIR"
     fi
 }
 trap cleanup EXIT
-
-require_cmd() {
-    for cmd in "$@"; do
-        command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd"
-    done
-}
 
 usage() {
     sed -n '/^# Usage:/,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \?//'
@@ -61,21 +74,29 @@ usage() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --iso)        ISO_PATH="$2"; shift 2 ;;
-            --arch)       ARCH="$2"; shift 2 ;;
-            --edition)    EDITION="$2"; shift 2 ;;
-            --slim)       SLIM=true; shift ;;
-            --output)     OUTPUT="$2"; shift 2 ;;
+            --iso)            ISO_PATH="$2"; shift 2 ;;
+            --arch)           ARCH="$2"; shift 2 ;;
+            --edition)        EDITION="$2"; shift 2 ;;
+            --slim)           SLIM=true; shift ;;
+            --output)         OUTPUT="$2"; shift 2 ;;
             --inject-drivers) INJECT_DRIVERS=true; shift ;;
-            --woa-drivers) WOA_DRIVERS="$2"; shift 2 ;;
-            --size)       DISK_SIZE="$2"; shift 2 ;;
-            --help)       usage ;;
-            *)            die "Unknown option: $1" ;;
+            --woa-drivers)    WOA_DRIVERS="$2"; shift 2 ;;
+            --size)           DISK_SIZE="$2"; shift 2 ;;
+            --keep-work)      KEEP_WORK=true; shift ;;
+            --help)           usage ;;
+            *)                die "Unknown option: $1" ;;
         esac
     done
 
     [[ -n "$ISO_PATH" ]] || die "--iso is required"
     [[ -f "$ISO_PATH" ]] || die "ISO not found: $ISO_PATH"
+
+    # Auto-detect architecture from host if not specified
+    if [[ -z "$ARCH" ]]; then
+        ARCH=$(detect_arch)
+        info "Auto-detected architecture: $ARCH"
+    fi
+
     [[ "$ARCH" =~ ^(x86_64|arm64)$ ]] || die "Invalid arch: $ARCH (must be x86_64 or arm64)"
 
     if [[ -z "$OUTPUT" ]]; then
@@ -90,18 +111,15 @@ parse_args() {
 # --- ISO extraction and modification ---
 
 extract_iso() {
-    info "Extracting ISO to work directory"
     local mount_point="$WORK_DIR/iso_mount"
     local extract_dir="$WORK_DIR/iso_extracted"
 
     mkdir -p "$mount_point" "$extract_dir"
 
-    # Mount and copy (handles read-only ISO)
     sudo mount -o loop,ro "$ISO_PATH" "$mount_point"
     cp -a "$mount_point"/. "$extract_dir"/
     sudo umount "$mount_point"
 
-    # Make writable
     chmod -R u+w "$extract_dir"
 
     echo "$extract_dir"
@@ -109,7 +127,6 @@ extract_iso() {
 
 # --- Bloatware removal (tiny11-style) ---
 
-# Packages to remove for a slim image. Sourced from tiny11builder's approach.
 SLIM_PACKAGES=(
     Microsoft.BingNews
     Microsoft.BingWeather
@@ -143,32 +160,36 @@ slim_image() {
     local install_wim="$1/sources/install.wim"
     [[ -f "$install_wim" ]] || die "install.wim not found in extracted ISO"
 
-    info "Slimming Windows image (removing ${#SLIM_PACKAGES[@]} bloatware packages)"
-
     local wim_mount="$WORK_DIR/wim_mount"
     mkdir -p "$wim_mount"
 
     # Find the index for the requested edition
     local index
     index=$(wiminfo "$install_wim" | grep -B1 "Name:.*$EDITION" | grep "Index:" | awk '{print $2}' | head -1)
-    [[ -n "$index" ]] || die "Edition '$EDITION' not found in install.wim"
+    if [[ -z "$index" ]]; then
+        err "Edition '$EDITION' not found in install.wim. Available editions:"
+        wiminfo "$install_wim" | grep "Name:" >&2
+        exit 1
+    fi
 
     info "Mounting install.wim (index $index, edition: $EDITION)"
     sudo wimlib-imagex mountrw "$install_wim" "$index" "$wim_mount"
 
-    # Remove provisioned appx packages
+    local removed=0
     for pkg in "${SLIM_PACKAGES[@]}"; do
-        local pkg_dir
-        pkg_dir=$(find "$wim_mount/Program Files/WindowsApps" -maxdepth 1 -name "${pkg}_*" -type d 2>/dev/null || true)
-        if [[ -n "$pkg_dir" ]]; then
-            info "  Removing: $pkg"
-            sudo rm -rf "$pkg_dir"
+        local pkg_dirs
+        pkg_dirs=$(find "$wim_mount/Program Files/WindowsApps" -maxdepth 1 -name "${pkg}_*" -type d 2>/dev/null || true)
+        if [[ -n "$pkg_dirs" ]]; then
+            while IFS= read -r pkg_dir; do
+                info "  Removing: $(basename "$pkg_dir")"
+                sudo rm -rf "$pkg_dir"
+                removed=$((removed + 1))
+            done <<< "$pkg_dirs"
         fi
     done
 
-    # Remove provisioned package metadata from the registry hive
-    # This prevents packages from being re-provisioned on first login
-    if command -v hivexregedit >/dev/null 2>&1; then
+    # Deprovision via registry to prevent re-install on first login
+    if command -v hivexsh &>/dev/null; then
         info "Cleaning provisioned package registry entries"
         local software_hive="$wim_mount/Windows/System32/config/SOFTWARE"
         if [[ -f "$software_hive" ]]; then
@@ -180,61 +201,67 @@ EOF
             done
         fi
     else
-        warn "hivexregedit not found; skipping registry cleanup (packages may re-provision)"
+        warn "hivexsh not found; skipping registry cleanup (packages may re-provision)"
     fi
 
     sudo wimlib-imagex unmount --commit "$wim_mount"
-    info "Slimming complete"
+    ok "Removed $removed bloatware packages"
 }
 
 # --- Driver injection ---
 
+download_virtio_iso() {
+    local virtio_url="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso"
+    cached_download "$virtio_url" "virtio-win.iso"
+}
+
 inject_virtio_drivers() {
     local extract_dir="$1"
-    local install_wim="$extract_dir/sources/install.wim"
 
-    info "Injecting VirtIO drivers"
+    local virtio_iso
+    virtio_iso=$(download_virtio_iso)
 
-    # Download VirtIO ISO if not cached
-    local virtio_iso="$WORK_DIR/virtio-win.iso"
-    local virtio_url
-    if [[ "$ARCH" == "arm64" ]]; then
-        virtio_url="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso"
-    else
-        virtio_url="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso"
-    fi
-
-    if [[ ! -f "$virtio_iso" ]]; then
-        info "Downloading VirtIO drivers"
-        curl -fSL -o "$virtio_iso" "$virtio_url"
-    fi
-
-    # Mount VirtIO ISO
     local virtio_mount="$WORK_DIR/virtio_mount"
     mkdir -p "$virtio_mount"
     sudo mount -o loop,ro "$virtio_iso" "$virtio_mount"
 
-    # Copy drivers to a directory on the install media so Windows setup can find them
     local driver_dest="$extract_dir/\$WinPEDriver\$"
     mkdir -p "$driver_dest"
 
     local win_arch
-    [[ "$ARCH" == "x86_64" ]] && win_arch="amd64" || win_arch="ARM64"
+    win_arch=$(arch_to_windows "$ARCH")
 
-    # Copy all relevant driver directories
+    local injected=0
     for driver_dir in "$virtio_mount"/*/; do
         local driver_name
         driver_name=$(basename "$driver_dir")
-        local arch_dir="$driver_dir/w11/$win_arch"
-        [[ -d "$arch_dir" ]] || arch_dir="$driver_dir/2k22/$win_arch"
-        [[ -d "$arch_dir" ]] || arch_dir="$driver_dir/2k19/$win_arch"
-        if [[ -d "$arch_dir" ]]; then
+        local arch_dir=""
+
+        # Try Windows 11, then Server 2022, then Server 2019
+        for win_ver in w11 2k22 2k19; do
+            if [[ -d "$driver_dir/$win_ver/$win_arch" ]]; then
+                arch_dir="$driver_dir/$win_ver/$win_arch"
+                break
+            fi
+        done
+
+        if [[ -n "$arch_dir" ]]; then
             info "  Adding driver: $driver_name"
             cp -r "$arch_dir" "$driver_dest/$driver_name"
+            injected=$((injected + 1))
         fi
     done
 
+    # Also inject any custom drivers from the drivers/ directory
+    local custom_drivers="$PIPELINE_DIR/drivers/custom"
+    if [[ -d "$custom_drivers" ]] && [[ -n "$(ls -A "$custom_drivers" 2>/dev/null)" ]]; then
+        info "Injecting custom drivers from $custom_drivers"
+        cp -r "$custom_drivers"/. "$driver_dest/"
+        injected=$((injected + $(find "$custom_drivers" -maxdepth 1 -mindepth 1 -type d | wc -l)))
+    fi
+
     sudo umount "$virtio_mount"
+    ok "Injected $injected driver packages"
 }
 
 inject_woa_drivers() {
@@ -243,13 +270,13 @@ inject_woa_drivers() {
     [[ "$ARCH" == "arm64" ]] || return 0
     [[ -n "$WOA_DRIVERS" ]] || return 0
 
-    info "Injecting Windows on ARM drivers"
-
     local driver_dest="$extract_dir/\$WinPEDriver\$/woa"
     mkdir -p "$driver_dest"
     cp -r "$WOA_DRIVERS"/. "$driver_dest"/
 
-    info "WOA drivers injected"
+    local count
+    count=$(find "$driver_dest" -name '*.inf' | wc -l)
+    ok "Injected $count WOA driver INF files"
 }
 
 # --- Answer file generation ---
@@ -258,19 +285,24 @@ generate_answer_file() {
     local extract_dir="$1"
     local answer_file="$extract_dir/autounattend.xml"
 
+    # Check for user-provided template first
     local template="$PIPELINE_DIR/answer-files/autounattend-${ARCH}.xml"
     if [[ -f "$template" ]]; then
         info "Using architecture-specific answer file template"
         cp "$template" "$answer_file"
-    else
-        info "Generating unattended answer file"
-        cat > "$answer_file" <<'XMLEOF'
+        return
+    fi
+
+    local xml_arch
+    xml_arch=$(arch_to_windows "$ARCH")
+
+    cat > "$answer_file" <<XMLEOF
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend"
           xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <settings pass="windowsPE">
     <component name="Microsoft-Windows-International-Core-WinPE"
-               processorArchitecture="__ARCH__"
+               processorArchitecture="${xml_arch}"
                publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
       <SetupUILanguage>
@@ -282,7 +314,7 @@ generate_answer_file() {
       <UserLocale>en-US</UserLocale>
     </component>
     <component name="Microsoft-Windows-Setup"
-               processorArchitecture="__ARCH__"
+               processorArchitecture="${xml_arch}"
                publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
       <DiskConfiguration>
@@ -341,7 +373,7 @@ generate_answer_file() {
   </settings>
   <settings pass="specialize">
     <component name="Microsoft-Windows-Deployment"
-               processorArchitecture="__ARCH__"
+               processorArchitecture="${xml_arch}"
                publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
       <RunSynchronous>
@@ -360,7 +392,7 @@ generate_answer_file() {
   </settings>
   <settings pass="oobeSystem">
     <component name="Microsoft-Windows-Shell-Setup"
-               processorArchitecture="__ARCH__"
+               processorArchitecture="${xml_arch}"
                publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
       <OOBE>
@@ -394,7 +426,7 @@ generate_answer_file() {
       <FirstLogonCommands>
         <SynchronousCommand wcm:action="add">
           <Order>1</Order>
-          <CommandLine>powershell -Command "Set-ExecutionPolicy RemoteSigned -Force"</CommandLine>
+          <CommandLine>powershell -ExecutionPolicy Bypass -File C:\iwt\setup-guest-tools.ps1</CommandLine>
         </SynchronousCommand>
       </FirstLogonCommands>
     </component>
@@ -402,13 +434,7 @@ generate_answer_file() {
 </unattend>
 XMLEOF
 
-        # Replace architecture placeholder
-        local xml_arch
-        [[ "$ARCH" == "x86_64" ]] && xml_arch="amd64" || xml_arch="arm64"
-        sed -i "s/__ARCH__/$xml_arch/g" "$answer_file"
-    fi
-
-    info "Answer file written"
+    ok "Answer file generated"
 }
 
 # --- Guest tools preparation ---
@@ -418,48 +444,61 @@ prepare_guest_tools() {
     local tools_dir="$extract_dir/\$OEM\$/\$1/iwt"
     mkdir -p "$tools_dir"
 
-    info "Preparing guest tools bundle"
-
-    # Create a post-install script that will be run on first boot
     cat > "$tools_dir/setup-guest-tools.ps1" <<'PS1EOF'
 # IWT Guest Tools Setup
 # Runs on first boot to configure the Windows guest for Incus integration.
 
 $ErrorActionPreference = "Stop"
+$logFile = "C:\iwt\setup.log"
 
-Write-Host "IWT: Configuring guest tools..."
+function Log($msg) {
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$ts  $msg" | Tee-Object -FilePath $logFile -Append
+}
+
+Log "IWT: Starting guest tools setup"
 
 # Enable incus-agent service if present
 $agentPath = "C:\Program Files\incus-agent\incus-agent.exe"
 if (Test-Path $agentPath) {
-    Write-Host "IWT: incus-agent found, ensuring service is running"
+    Log "IWT: incus-agent found, ensuring service is running"
     Start-Service -Name "incus-agent" -ErrorAction SilentlyContinue
 }
 
 # Install WinFsp if the MSI is bundled
 $winfspMsi = Join-Path $PSScriptRoot "winfsp.msi"
 if (Test-Path $winfspMsi) {
-    Write-Host "IWT: Installing WinFsp for filesystem passthrough"
-    Start-Process msiexec.exe -ArgumentList "/i `"$winfspMsi`" /qn" -Wait
+    Log "IWT: Installing WinFsp for filesystem passthrough"
+    $proc = Start-Process msiexec.exe -ArgumentList "/i `"$winfspMsi`" /qn" -Wait -PassThru
+    Log "IWT: WinFsp install exit code: $($proc.ExitCode)"
 }
 
-# Configure RemoteApp registry keys for seamless app integration
+# Configure RemoteApp -- allow all apps to be launched via RemoteApp
 $raKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Terminal Server\TSAppAllowList"
 if (-not (Test-Path $raKey)) {
     New-Item -Path $raKey -Force | Out-Null
 }
 Set-ItemProperty -Path $raKey -Name "fDisabledAllowList" -Value 1 -Type DWord
+Log "IWT: RemoteApp allow-all configured"
 
-# Allow RemoteApp from any source
-$customRDP = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-if (-not (Test-Path $customRDP)) {
-    New-Item -Path $customRDP -Force | Out-Null
+# Disable Windows Update automatic restart
+$wuKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+if (-not (Test-Path $wuKey)) {
+    New-Item -Path $wuKey -Force | Out-Null
 }
+Set-ItemProperty -Path $wuKey -Name "NoAutoRebootWithLoggedOnUsers" -Value 1 -Type DWord
+Log "IWT: Disabled auto-restart for Windows Update"
 
-Write-Host "IWT: Guest tools setup complete"
+# Enable long paths
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -Type DWord
+
+# Disable hibernation (saves disk space in VM)
+& powercfg /hibernate off 2>$null
+
+Log "IWT: Guest tools setup complete"
 PS1EOF
 
-    info "Guest tools prepared"
+    ok "Guest tools prepared"
 }
 
 # --- Disk image creation ---
@@ -467,29 +506,38 @@ PS1EOF
 create_disk_image() {
     local extract_dir="$1"
 
-    info "Creating ${DISK_SIZE} QCOW2 disk image: $OUTPUT"
     qemu-img create -f qcow2 "$OUTPUT" "$DISK_SIZE"
+    ok "Created ${DISK_SIZE} QCOW2 disk: $OUTPUT"
 
     # Repack the modified ISO
     local modified_iso="$WORK_DIR/windows-modified.iso"
-    info "Repacking modified ISO"
-    mkisofs -b boot/etfsboot.com -no-emul-boot -boot-load-size 8 \
-        -iso-level 4 -udf -o "$modified_iso" "$extract_dir" 2>/dev/null || \
-    xorriso -as mkisofs \
-        -iso-level 3 -udf \
-        -b boot/etfsboot.com -no-emul-boot -boot-load-size 8 \
-        -eltorito-alt-boot -b efi/microsoft/boot/efisys.bin -no-emul-boot \
-        -o "$modified_iso" "$extract_dir"
 
-    info "Disk image created: $OUTPUT"
-    info "Modified ISO created: $modified_iso"
-    info ""
-    info "To install, run the VM with:"
-    info "  incus launch windows --vm --empty"
-    info "  incus config device add windows install disk source=$modified_iso"
-    info "  incus config device add windows disk0 disk source=$OUTPUT"
-    info ""
-    info "Or use: iwt vm create --image $modified_iso --disk $OUTPUT"
+    if command -v xorriso &>/dev/null; then
+        xorriso -as mkisofs \
+            -iso-level 3 -udf \
+            -b boot/etfsboot.com -no-emul-boot -boot-load-size 8 \
+            -eltorito-alt-boot -b efi/microsoft/boot/efisys.bin -no-emul-boot \
+            -o "$modified_iso" "$extract_dir" 2>&1 | tail -3
+    elif command -v mkisofs &>/dev/null; then
+        mkisofs -b boot/etfsboot.com -no-emul-boot -boot-load-size 8 \
+            -iso-level 4 -udf -o "$modified_iso" "$extract_dir" 2>&1 | tail -3
+    else
+        die "Neither xorriso nor mkisofs found. Install one of them."
+    fi
+
+    # Copy modified ISO next to the output image
+    local final_iso
+    final_iso="$(dirname "$OUTPUT")/$(basename "$OUTPUT" .qcow2)-install.iso"
+    mv "$modified_iso" "$final_iso"
+
+    local iso_size
+    iso_size=$(stat -c%s "$final_iso" 2>/dev/null || stat -f%z "$final_iso" 2>/dev/null || echo "0")
+
+    ok "Modified ISO: $final_iso ($(human_size "$iso_size"))"
+    echo ""
+    bold "Next steps:"
+    echo "  iwt vm create --name win11 --image $final_iso --disk $OUTPUT"
+    echo "  iwt vm start win11"
 }
 
 # --- Main ---
@@ -497,45 +545,64 @@ create_disk_image() {
 main() {
     parse_args "$@"
 
-    require_cmd qemu-img curl
-
-    # Prefer wimlib tools for WIM manipulation
+    # Determine required tools based on options
+    local required_cmds=(qemu-img curl)
     if [[ "$SLIM" == true ]]; then
-        require_cmd wimlib-imagex
+        required_cmds+=(wimlib-imagex)
+    fi
+    require_cmd "${required_cmds[@]}"
+
+    # Check for ISO repacking tool
+    if ! command -v xorriso &>/dev/null && ! command -v mkisofs &>/dev/null; then
+        die "Neither xorriso nor mkisofs found. Install one of them."
     fi
 
     WORK_DIR=$(mktemp -d -t iwt-build-XXXXXX)
-    info "Work directory: $WORK_DIR"
-    info "Architecture: $ARCH"
-    info "Edition: $EDITION"
-    info "Slim: $SLIM"
-    info "Output: $OUTPUT"
 
-    # Step 1: Extract ISO
+    # Count steps for progress
+    local total=4
+    [[ "$SLIM" == true ]] && total=$((total + 1))
+    [[ "$INJECT_DRIVERS" == true ]] && total=$((total + 1))
+    progress_init "$total"
+
+    echo ""
+    bold "IWT Image Build"
+    info "ISO:        $ISO_PATH"
+    info "Arch:       $ARCH"
+    info "Edition:    $EDITION"
+    info "Slim:       $SLIM"
+    info "Drivers:    $INJECT_DRIVERS"
+    info "Disk size:  $DISK_SIZE"
+    info "Output:     $OUTPUT"
+    info "Work dir:   $WORK_DIR"
+    echo ""
+
+    progress_step "Extracting ISO"
     local extract_dir
     extract_dir=$(extract_iso)
 
-    # Step 2: Slim (optional)
     if [[ "$SLIM" == true ]]; then
+        progress_step "Slimming image (removing bloatware)"
         slim_image "$extract_dir"
     fi
 
-    # Step 3: Inject drivers
     if [[ "$INJECT_DRIVERS" == true ]]; then
+        progress_step "Injecting drivers"
         inject_virtio_drivers "$extract_dir"
         inject_woa_drivers "$extract_dir"
     fi
 
-    # Step 4: Generate answer file
+    progress_step "Generating answer file"
     generate_answer_file "$extract_dir"
 
-    # Step 5: Prepare guest tools
+    progress_step "Preparing guest tools"
     prepare_guest_tools "$extract_dir"
 
-    # Step 6: Create disk image + repack ISO
+    progress_step "Creating disk image and repacking ISO"
     create_disk_image "$extract_dir"
 
-    info "Build complete."
+    echo ""
+    ok "Build complete."
 }
 
 main "$@"

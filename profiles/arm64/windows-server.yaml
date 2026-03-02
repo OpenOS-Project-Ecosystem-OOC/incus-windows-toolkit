@@ -1,0 +1,33 @@
+# Incus profile: Windows Server VM (ARM64)
+# Headless configuration for server workloads on ARM.
+
+description: Windows Server VM optimized for headless ARM64 operation
+config:
+  security.secureboot: "true"
+  security.csm: "false"
+
+  limits.cpu: "4"
+  limits.memory: "4GiB"
+
+  raw.qemu: >-
+    -cpu host
+    -machine virt,gic-version=max
+
+  agent.nic_config: "true"
+  cloud-init.user-data: ""
+
+devices:
+  root:
+    type: disk
+    path: /
+    pool: default
+    size: 64GiB
+
+  tpm:
+    type: tpm
+    path: /dev/tpm0
+
+  eth0:
+    type: nic
+    network: incusbr0
+    nictype: bridged

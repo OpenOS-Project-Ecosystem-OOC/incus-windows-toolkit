@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 # Resolve install location
 if [[ -L "${BASH_SOURCE[0]}" ]]; then
@@ -22,17 +22,11 @@ fi
 
 export IWT_ROOT
 
-# --- Colors ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# Source shared library
+source "$IWT_ROOT/cli/lib.sh"
 
-info()  { echo -e "${BLUE}::${NC} $*"; }
-ok()    { echo -e "${GREEN}OK${NC} $*"; }
-warn()  { echo -e "${YELLOW}WARNING${NC} $*" >&2; }
-err()   { echo -e "${RED}ERROR${NC} $*" >&2; }
+# Load user config
+load_config
 
 # --- Help ---
 
@@ -48,6 +42,7 @@ Commands:
   profiles    Install and manage Incus VM profiles
   remoteapp   Launch Windows apps as seamless Linux windows
   doctor      Check system prerequisites
+  config      Manage IWT configuration
   version     Show version
 
 Run 'iwt <command> --help' for details on each command.
@@ -57,9 +52,13 @@ EOF
 # --- Doctor (prerequisite check) ---
 
 cmd_doctor() {
+    local auto_install=false
+    [[ "${1:-}" == "--install" ]] && auto_install=true
+
     info "Checking prerequisites..."
     local ok_count=0
     local fail_count=0
+    local failed_cmds=()
 
     check() {
         local name="$1" cmd="$2"
@@ -69,6 +68,7 @@ cmd_doctor() {
         else
             err "$name not found ($cmd)"
             fail_count=$((fail_count + 1))
+            failed_cmds+=("$cmd")
         fi
     }
 
@@ -77,26 +77,43 @@ cmd_doctor() {
     check "curl"            curl
     check "xfreerdp3"       xfreerdp3
     check "wimlib"          wimlib-imagex
-    check "mkisofs"         mkisofs
+    check "hivex"           hivexsh
+
+    # Check for at least one ISO tool
+    if command -v xorriso &>/dev/null; then
+        ok "ISO tool (xorriso)"
+        ok_count=$((ok_count + 1))
+    elif command -v mkisofs &>/dev/null; then
+        ok "ISO tool (mkisofs)"
+        ok_count=$((ok_count + 1))
+    else
+        err "ISO tool not found (need xorriso or mkisofs)"
+        fail_count=$((fail_count + 1))
+        failed_cmds+=("xorriso")
+    fi
+
     check "shellcheck"      shellcheck
 
     # Check KVM
     if [[ -e /dev/kvm ]]; then
         ok "KVM (/dev/kvm)"
         ok_count=$((ok_count + 1))
+    elif [[ -r /proc/cpuinfo ]] && grep -qE '(vmx|svm)' /proc/cpuinfo; then
+        warn "KVM supported by CPU but /dev/kvm missing (load kvm module?)"
+        fail_count=$((fail_count + 1))
     else
         err "KVM not available (/dev/kvm missing)"
         fail_count=$((fail_count + 1))
     fi
 
-    # Check architecture
+    # Architecture
     local arch
-    arch=$(uname -m)
+    arch=$(detect_arch)
     info "Host architecture: $arch"
 
-    # Check Incus connectivity
+    # Incus connectivity
     if command -v incus &>/dev/null; then
-        if incus info &>/dev/null; then
+        if incus info &>/dev/null 2>&1; then
             ok "Incus daemon reachable"
             ok_count=$((ok_count + 1))
         else
@@ -107,7 +124,69 @@ cmd_doctor() {
 
     echo ""
     info "Results: $ok_count passed, $fail_count failed"
+
+    # Show install suggestions for failures
+    if [[ $fail_count -gt 0 ]]; then
+        echo ""
+        info "Install suggestions:"
+        for cmd in "${failed_cmds[@]}"; do
+            suggest_install "$cmd"
+        done
+
+        if [[ "$auto_install" == true ]]; then
+            echo ""
+            info "Auto-install is not yet implemented. Install the packages above manually."
+        fi
+    fi
+
     [[ $fail_count -eq 0 ]] && return 0 || return 1
+}
+
+# --- Config commands ---
+
+cmd_config() {
+    local subcmd="${1:-help}"
+    shift || true
+
+    case "$subcmd" in
+        init)
+            init_config
+            ;;
+        show)
+            if [[ -f "$IWT_CONFIG_FILE" ]]; then
+                cat "$IWT_CONFIG_FILE"
+            else
+                info "No config file found. Run 'iwt config init' to create one."
+            fi
+            ;;
+        edit)
+            if [[ ! -f "$IWT_CONFIG_FILE" ]]; then
+                init_config
+            fi
+            "${EDITOR:-vi}" "$IWT_CONFIG_FILE"
+            ;;
+        path)
+            echo "$IWT_CONFIG_FILE"
+            ;;
+        help|--help|-h)
+            cat <<EOF
+iwt config - Manage IWT configuration
+
+Subcommands:
+  init    Create default config file
+  show    Display current config
+  edit    Open config in \$EDITOR
+  path    Print config file path
+
+Config location: \$HOME/.config/iwt/config
+Override with: IWT_CONFIG_FILE=/path/to/config
+EOF
+            ;;
+        *)
+            err "Unknown config subcommand: $subcmd"
+            exit 1
+            ;;
+    esac
 }
 
 # --- Image commands ---
@@ -129,13 +208,14 @@ Subcommands:
 
 Options (passed to build):
   --iso PATH          Path to Windows ISO (required)
-  --arch ARCH         x86_64 | arm64 (default: x86_64)
+  --arch ARCH         x86_64 | arm64 (default: auto-detect)
   --edition EDITION   Windows edition (default: Pro)
   --slim              Strip bloatware (tiny11-style)
   --output PATH       Output image path
   --inject-drivers    Inject VirtIO + platform drivers
   --woa-drivers PATH  WOA driver directory (ARM only)
   --size SIZE         Disk size (default: 64G)
+  --keep-work         Preserve work directory for debugging
 
 Example:
   iwt image build --iso Win11_24H2.iso --slim --arch x86_64
@@ -175,9 +255,16 @@ cmd_vm() {
                 local ip
                 ip=$(vm_get_ip 2>/dev/null || echo "unknown")
                 ok "$IWT_VM_NAME is running (IP: $ip)"
-            else
+            elif vm_exists; then
                 info "$IWT_VM_NAME is stopped"
+            else
+                err "VM '$IWT_VM_NAME' does not exist"
+                return 1
             fi
+            ;;
+        list)
+            info "Incus VMs:"
+            incus list --format table type=virtual-machine
             ;;
         rdp)
             IWT_VM_NAME="${1:-$IWT_VM_NAME}"
@@ -195,6 +282,7 @@ Subcommands:
   start [name]        Start a VM
   stop [name]         Stop a VM
   status [name]       Show VM status
+  list                List all Incus VMs
   rdp [name]          Open full RDP desktop session
 
 Create options:
@@ -231,10 +319,10 @@ cmd_vm_create() {
         esac
     done
 
-    # Detect architecture
-    local arch
-    arch=$(uname -m)
-    [[ "$arch" == "aarch64" ]] && arch="arm64" || arch="x86_64"
+    # Check if VM already exists
+    if incus info "$name" &>/dev/null; then
+        die "VM '$name' already exists. Delete it first: incus delete $name"
+    fi
 
     # Check if profile exists, install if not
     if ! incus profile show "$profile" &>/dev/null; then
@@ -242,15 +330,17 @@ cmd_vm_create() {
         cmd_profiles install
     fi
 
-    info "Creating VM: $name (profile: $profile, arch: $arch)"
+    info "Creating VM: $name (profile: $profile)"
     incus init "$name" --vm --empty --profile "$profile"
 
     if [[ -n "$image" ]]; then
+        [[ -f "$image" ]] || die "ISO not found: $image"
         info "Attaching install ISO: $image"
         incus config device add "$name" install disk source="$(realpath "$image")"
     fi
 
     if [[ -n "$disk" ]]; then
+        [[ -f "$disk" ]] || die "Disk image not found: $disk"
         info "Attaching disk image: $disk"
         incus config device add "$name" data disk source="$(realpath "$disk")"
     fi
@@ -272,6 +362,37 @@ cmd_profiles() {
             info "Available profiles:"
             find "$IWT_ROOT/profiles" -name '*.yaml' -printf "  %P\n" | sort
             ;;
+        show)
+            local profile_name="${1:?Usage: iwt profiles show <name>}"
+            local arch
+            arch=$(detect_arch)
+            local profile_file="$IWT_ROOT/profiles/$arch/$profile_name.yaml"
+            if [[ ! -f "$profile_file" ]]; then
+                # Try the other arch
+                profile_file=$(find "$IWT_ROOT/profiles" -name "$profile_name.yaml" -print -quit)
+            fi
+            if [[ -n "$profile_file" && -f "$profile_file" ]]; then
+                cat "$profile_file"
+            else
+                die "Profile not found: $profile_name"
+            fi
+            ;;
+        diff)
+            # Show differences between local profile files and what's in Incus
+            local arch
+            arch=$(detect_arch)
+            local profile_dir="$IWT_ROOT/profiles/$arch"
+            for profile_file in "$profile_dir"/*.yaml; do
+                local pname
+                pname=$(basename "$profile_file" .yaml)
+                if incus profile show "$pname" &>/dev/null; then
+                    info "Diff for $pname:"
+                    diff <(incus profile show "$pname") "$profile_file" || true
+                else
+                    info "$pname: not installed in Incus"
+                fi
+            done
+            ;;
         help|--help|-h)
             cat <<EOF
 iwt profiles - Manage Incus VM profiles
@@ -279,6 +400,8 @@ iwt profiles - Manage Incus VM profiles
 Subcommands:
   install [--arch ARCH]   Install profiles into Incus
   list                    List available profile files
+  show <name>             Display a profile's YAML
+  diff                    Compare local profiles with Incus
 
 Options:
   --arch ARCH    Install only for this architecture (x86_64|arm64)
@@ -286,7 +409,8 @@ Options:
 
 Example:
   iwt profiles install
-  iwt profiles install --arch arm64
+  iwt profiles show windows-desktop
+  iwt profiles diff
 EOF
             ;;
         *)
@@ -306,18 +430,16 @@ cmd_profiles_install() {
         esac
     done
 
-    # Auto-detect architecture
     if [[ -z "$arch" ]]; then
-        local host_arch
-        host_arch=$(uname -m)
-        [[ "$host_arch" == "aarch64" ]] && arch="arm64" || arch="x86_64"
+        arch=$(detect_arch)
     fi
 
     local profile_dir="$IWT_ROOT/profiles/$arch"
     if [[ ! -d "$profile_dir" ]]; then
-        err "No profiles found for architecture: $arch"
-        exit 1
+        die "No profiles found for architecture: $arch"
     fi
+
+    require_cmd incus
 
     for profile_file in "$profile_dir"/*.yaml; do
         local profile_name
@@ -355,10 +477,10 @@ cmd_remoteapp() {
             ;;
         config)
             local conf="$IWT_ROOT/remoteapp/freedesktop/apps.conf"
-            info "App config: $conf"
-            if [[ -n "${EDITOR:-}" ]]; then
-                "$EDITOR" "$conf"
+            if [[ "${1:-}" == "edit" ]]; then
+                "${EDITOR:-vi}" "$conf"
             else
+                info "App config: $conf"
                 cat "$conf"
             fi
             ;;
@@ -370,17 +492,93 @@ Subcommands:
   launch <app>    Launch a Windows app (exe name or full path)
   install         Generate .desktop files for Linux app menus
   discover        List installed Windows applications
-  config          View/edit the app configuration
+  config [edit]   View or edit the app configuration
 
 Examples:
   iwt remoteapp launch notepad
   iwt remoteapp launch "C:\\Program Files\\app.exe"
   iwt remoteapp install
   iwt remoteapp discover
+  iwt remoteapp config edit
 EOF
             ;;
         *)
             err "Unknown remoteapp subcommand: $subcmd"
+            exit 1
+            ;;
+    esac
+}
+
+# --- Tab completion ---
+
+cmd_completion() {
+    local shell="${1:-bash}"
+    case "$shell" in
+        bash)
+            cat <<'COMP'
+_iwt_completions() {
+    local cur prev commands
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    commands="image vm profiles remoteapp doctor config version help"
+
+    case "$prev" in
+        iwt)
+            COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+            ;;
+        image)
+            COMPREPLY=($(compgen -W "build help" -- "$cur"))
+            ;;
+        vm)
+            COMPREPLY=($(compgen -W "create start stop status list rdp help" -- "$cur"))
+            ;;
+        profiles)
+            COMPREPLY=($(compgen -W "install list show diff help" -- "$cur"))
+            ;;
+        remoteapp)
+            COMPREPLY=($(compgen -W "launch install discover config help" -- "$cur"))
+            ;;
+        config)
+            COMPREPLY=($(compgen -W "init show edit path help" -- "$cur"))
+            ;;
+    esac
+}
+complete -F _iwt_completions iwt
+COMP
+            ;;
+        zsh)
+            cat <<'COMP'
+#compdef iwt
+_iwt() {
+    local -a commands=(
+        'image:Build and manage Windows VM images'
+        'vm:Create, start, stop, and manage Windows VMs'
+        'profiles:Install and manage Incus VM profiles'
+        'remoteapp:Launch Windows apps as seamless Linux windows'
+        'doctor:Check system prerequisites'
+        'config:Manage IWT configuration'
+        'version:Show version'
+    )
+    _arguments '1:command:->cmd' '*::arg:->args'
+    case $state in
+        cmd) _describe 'command' commands ;;
+        args)
+            case $words[1] in
+                image)     _values 'subcommand' build help ;;
+                vm)        _values 'subcommand' create start stop status list rdp help ;;
+                profiles)  _values 'subcommand' install list show diff help ;;
+                remoteapp) _values 'subcommand' launch install discover config help ;;
+                config)    _values 'subcommand' init show edit path help ;;
+            esac
+            ;;
+    esac
+}
+_iwt
+COMP
+            ;;
+        *)
+            err "Unsupported shell: $shell (use bash or zsh)"
             exit 1
             ;;
     esac
@@ -398,6 +596,8 @@ main() {
         profiles)   cmd_profiles "$@" ;;
         remoteapp)  cmd_remoteapp "$@" ;;
         doctor)     cmd_doctor "$@" ;;
+        config)     cmd_config "$@" ;;
+        completion) cmd_completion "$@" ;;
         version)    echo "iwt v${VERSION}" ;;
         help|--help|-h) show_help ;;
         *)
