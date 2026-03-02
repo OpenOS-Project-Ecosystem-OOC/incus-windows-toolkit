@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="1.0.0"
 
 # Resolve install location
 if [[ -L "${BASH_SOURCE[0]}" ]]; then
@@ -39,6 +39,7 @@ Usage: iwt <command> [subcommand] [options]
 Commands:
   image       Build and manage Windows VM images
   vm          Create, start, stop, and manage Windows VMs
+  fleet       Multi-VM orchestration (start-all, stop-all, backup-all)
   profiles    Install and manage Incus VM profiles
   remoteapp   Launch Windows apps as seamless Linux windows
   tui         Launch interactive terminal UI
@@ -332,6 +333,9 @@ cmd_vm() {
         first-boot)
             exec "$IWT_ROOT/guest/first-boot.sh" "$@"
             ;;
+        monitor)
+            exec "$IWT_ROOT/cli/monitor.sh" "$@"
+            ;;
         help|--help|-h)
             cat <<EOF
 iwt vm - Manage Windows VMs
@@ -349,6 +353,7 @@ Subcommands:
   export [name]       Publish VM as reusable Incus image
   import <path>       Import VM from backup or image
   first-boot [opts]   Run first-boot PowerShell scripts in a VM
+  monitor <action>    VM resource monitoring and stats
   snapshot <action>   Manage VM snapshots
   share <action>      Manage shared folders
   gpu <action>        Manage GPU passthrough
@@ -1532,6 +1537,7 @@ main() {
     case "$cmd" in
         image)      cmd_image "$@" ;;
         vm)         cmd_vm "$@" ;;
+        fleet)      exec "$IWT_ROOT/cli/fleet.sh" "$@" ;;
         profiles)   cmd_profiles "$@" ;;
         remoteapp)  cmd_remoteapp "$@" ;;
         tui)        exec "$IWT_ROOT/tui/iwt-tui.sh" "$@" ;;

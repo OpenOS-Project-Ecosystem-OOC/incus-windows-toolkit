@@ -1,0 +1,19 @@
+Source: incus-windows-toolkit
+Section: admin
+Priority: optional
+Maintainer: IWT Contributors <noreply@example.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Homepage: https://github.com/Interested-Deving-1896/incus-windows-toolkit
+
+Package: incus-windows-toolkit
+Architecture: all
+Depends: bash (>= 4.0), curl, jq, ${misc:Depends}
+Recommends: incus, qemu-utils, wimlib-tools, xorriso, freerdp2-x11 | freerdp3-x11
+Suggests: dialog, hivex, cabextract, shellcheck
+Description: Unified CLI for Windows VM management on Incus
+ IWT handles the full Windows VM lifecycle on Incus: ISO download,
+ image building with driver injection and debloating, VM creation
+ from templates, guest tool installation, GPU/USB passthrough,
+ shared folders, RemoteApp, snapshots, and backup/export.
+ Supports x86_64 and ARM64.

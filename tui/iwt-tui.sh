@@ -95,6 +95,7 @@ menu_main() {
         local choice
         choice=$(_dlg_menu "Main Menu" "Select an action:" \
             "vm"        "Manage Windows VMs" \
+            "fleet"     "Multi-VM orchestration" \
             "image"     "Build & download Windows images" \
             "profiles"  "Manage Incus profiles" \
             "doctor"    "Check prerequisites" \
@@ -103,6 +104,7 @@ menu_main() {
 
         case "$choice" in
             vm)       menu_vm ;;
+            fleet)    menu_fleet ;;
             image)    menu_image ;;
             profiles) menu_profiles ;;
             doctor)   _run_cmd "Doctor" "$IWT_CMD" doctor ;;
@@ -125,6 +127,7 @@ menu_vm() {
             "rdp"         "Open RDP desktop session" \
             "setup-guest" "Install guest tools (WinFsp, VirtIO)" \
             "backup"      "Backup, export, and import VMs" \
+            "monitor"     "Resource monitoring and stats" \
             "snapshot"    "Manage snapshots" \
             "share"       "Manage shared folders" \
             "gpu"         "Manage GPU passthrough" \
@@ -141,6 +144,7 @@ menu_vm() {
             rdp)         menu_vm_action "rdp" ;;
             setup-guest) menu_setup_guest ;;
             backup)      menu_backup ;;
+            monitor)     menu_monitor ;;
             snapshot)    menu_snapshot ;;
             share)       menu_share ;;
             gpu)         menu_gpu ;;
@@ -194,6 +198,57 @@ menu_vm_create() {
             "windows-server"  "Headless server configuration") || return
         _run_cmd "Creating VM" "$IWT_CMD" vm create --name "$name" --profile "$profile"
     fi
+}
+
+# --- Fleet Menu ---
+
+menu_fleet() {
+    while true; do
+        local choice
+        choice=$(_dlg_menu "Fleet Management" "Select action:" \
+            "list"       "List all VMs" \
+            "status"     "Status overview" \
+            "start-all"  "Start all stopped VMs" \
+            "stop-all"   "Stop all running VMs" \
+            "backup-all" "Backup all VMs" \
+            "health"     "System health check" \
+            "back"       "Back") || break
+
+        case "$choice" in
+            list)       _run_cmd "Fleet" "$IWT_CMD" fleet list ;;
+            status)     _run_cmd "Status" "$IWT_CMD" fleet status ;;
+            start-all)  _run_cmd "Start All" "$IWT_CMD" fleet start-all ;;
+            stop-all)   _run_cmd "Stop All" "$IWT_CMD" fleet stop-all ;;
+            backup-all) _run_cmd "Backup All" "$IWT_CMD" fleet backup-all ;;
+            health)     _run_cmd "Health" "$IWT_CMD" vm monitor health ;;
+            back)       break ;;
+        esac
+    done
+}
+
+# --- Monitor Menu ---
+
+menu_monitor() {
+    local vm
+    vm=$(_pick_vm) || return
+
+    while true; do
+        local choice
+        choice=$(_dlg_menu "Monitor: $vm" "Select view:" \
+            "status"  "Detailed status" \
+            "stats"   "Resource statistics" \
+            "disk"    "Disk usage" \
+            "uptime"  "Uptime and history" \
+            "back"    "Back") || break
+
+        case "$choice" in
+            status) _run_cmd "Status" "$IWT_CMD" vm monitor status "$vm" ;;
+            stats)  _run_cmd "Stats" "$IWT_CMD" vm monitor stats "$vm" ;;
+            disk)   _run_cmd "Disk" "$IWT_CMD" vm monitor disk "$vm" ;;
+            uptime) _run_cmd "Uptime" "$IWT_CMD" vm monitor uptime "$vm" ;;
+            back)   break ;;
+        esac
+    done
 }
 
 # --- Backup Menu ---

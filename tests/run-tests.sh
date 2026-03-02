@@ -528,6 +528,108 @@ test_templates_have_first_boot() {
     grep -q 'first_boot:' "$IWT_ROOT/templates/dev.yaml"
 }
 
+# --- Makefile tests ---
+
+test_makefile_has_install() {
+    grep -q '^install:' "$IWT_ROOT/Makefile"
+    grep -q '^uninstall:' "$IWT_ROOT/Makefile"
+}
+
+test_makefile_has_version() {
+    grep -q 'VERSION' "$IWT_ROOT/Makefile"
+}
+
+test_man_page_source_exists() {
+    [[ -f "$IWT_ROOT/doc/iwt.1.md" ]]
+}
+
+# --- Packaging tests ---
+
+test_aur_pkgbuild_exists() {
+    [[ -f "$IWT_ROOT/packaging/aur/PKGBUILD" ]]
+    grep -q 'pkgname=incus-windows-toolkit' "$IWT_ROOT/packaging/aur/PKGBUILD"
+}
+
+test_deb_control_exists() {
+    [[ -f "$IWT_ROOT/packaging/deb/control" ]]
+}
+
+test_rpm_spec_exists() {
+    [[ -f "$IWT_ROOT/packaging/rpm/iwt.spec" ]]
+}
+
+# --- README tests ---
+
+test_readme_has_feature_matrix() {
+    grep -q 'Feature Matrix' "$IWT_ROOT/README.md"
+}
+
+test_readme_has_quick_start() {
+    grep -q 'Quick Start' "$IWT_ROOT/README.md"
+}
+
+test_readme_has_architecture() {
+    grep -q 'Architecture' "$IWT_ROOT/README.md"
+}
+
+# --- Monitor tests ---
+
+test_monitor_script_exists() {
+    [[ -x "$IWT_ROOT/cli/monitor.sh" ]]
+}
+
+test_monitor_help() {
+    local output
+    output=$("$IWT_ROOT/cli/monitor.sh" help 2>&1)
+    echo "$output" | grep -q 'status'
+    echo "$output" | grep -q 'stats'
+    echo "$output" | grep -q 'health'
+}
+
+test_cli_vm_monitor_dispatch() {
+    grep -q 'monitor)' "$IWT_ROOT/cli/iwt.sh"
+    grep -q 'monitor.sh' "$IWT_ROOT/cli/iwt.sh"
+}
+
+test_cli_vm_help_mentions_monitor() {
+    local output
+    output=$("$IWT_ROOT/cli/iwt.sh" vm help 2>&1)
+    echo "$output" | grep -q 'monitor'
+}
+
+# --- Fleet tests ---
+
+test_fleet_script_exists() {
+    [[ -x "$IWT_ROOT/cli/fleet.sh" ]]
+}
+
+test_fleet_help() {
+    local output
+    output=$("$IWT_ROOT/cli/fleet.sh" help 2>&1)
+    echo "$output" | grep -q 'start-all'
+    echo "$output" | grep -q 'stop-all'
+    echo "$output" | grep -q 'backup-all'
+}
+
+test_cli_fleet_dispatch() {
+    grep -q 'fleet)' "$IWT_ROOT/cli/iwt.sh"
+    grep -q 'fleet.sh' "$IWT_ROOT/cli/iwt.sh"
+}
+
+test_cli_help_mentions_fleet() {
+    local output
+    output=$("$IWT_ROOT/cli/iwt.sh" help 2>&1)
+    echo "$output" | grep -q 'fleet'
+}
+
+test_tui_has_fleet_menu() {
+    grep -q 'menu_fleet' "$IWT_ROOT/tui/iwt-tui.sh"
+}
+
+test_tui_has_monitor_menu() {
+    grep -q 'menu_monitor' "$IWT_ROOT/tui/iwt-tui.sh"
+}
+
 # --- Lint ---
 
 test_shellcheck() {
@@ -653,6 +755,25 @@ run_unit_tests() {
     run_test "CLI vm first-boot"       test_cli_vm_first_boot_dispatch
     run_test "CLI vm help first-boot"  test_cli_vm_help_mentions_first_boot
     run_test "Templates have hooks"    test_templates_have_first_boot
+    run_test "Makefile install"        test_makefile_has_install
+    run_test "Makefile version"        test_makefile_has_version
+    run_test "Man page source"         test_man_page_source_exists
+    run_test "AUR PKGBUILD"            test_aur_pkgbuild_exists
+    run_test "Deb control"             test_deb_control_exists
+    run_test "RPM spec"                test_rpm_spec_exists
+    run_test "README feature matrix"   test_readme_has_feature_matrix
+    run_test "README quick start"      test_readme_has_quick_start
+    run_test "README architecture"     test_readme_has_architecture
+    run_test "Monitor script"          test_monitor_script_exists
+    run_test "Monitor help"            test_monitor_help
+    run_test "CLI vm monitor"          test_cli_vm_monitor_dispatch
+    run_test "CLI vm help monitor"     test_cli_vm_help_mentions_monitor
+    run_test "Fleet script"            test_fleet_script_exists
+    run_test "Fleet help"              test_fleet_help
+    run_test "CLI fleet dispatch"      test_cli_fleet_dispatch
+    run_test "CLI help fleet"          test_cli_help_mentions_fleet
+    run_test "TUI has fleet"           test_tui_has_fleet_menu
+    run_test "TUI has monitor"         test_tui_has_monitor_menu
 }
 
 run_lint() {

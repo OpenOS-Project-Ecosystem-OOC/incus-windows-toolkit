@@ -1,0 +1,26 @@
+# Maintainer: IWT Contributors
+pkgname=incus-windows-toolkit
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Unified CLI for Windows VM management on Incus"
+arch=('any')
+url="https://github.com/Interested-Deving-1896/incus-windows-toolkit"
+license=('MIT')
+depends=('bash' 'curl' 'jq' 'incus')
+optdepends=(
+    'qemu-img: image building'
+    'wimlib: image slimming and driver injection'
+    'xorriso: ISO repacking'
+    'freerdp: RDP connections'
+    'dialog: TUI interface'
+    'hivex: registry editing during image build'
+    'cabextract: ARM64 ISO building'
+    'shellcheck: development linting'
+)
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    cd "${pkgname}-${pkgver}"
+    make DESTDIR="${pkgdir}" PREFIX=/usr install
+}
