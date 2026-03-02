@@ -197,6 +197,36 @@ test_shares_conf_exists() {
     [[ -f "$IWT_ROOT/remoteapp/freedesktop/shares.conf" ]]
 }
 
+test_cli_vm_gpu_help() {
+    "$IWT_ROOT/cli/iwt.sh" vm gpu --help | grep -q "attach"
+    "$IWT_ROOT/cli/iwt.sh" vm gpu --help | grep -q "looking-glass"
+    "$IWT_ROOT/cli/iwt.sh" vm gpu --help | grep -q "iommu"
+}
+
+test_cli_vm_help_mentions_gpu() {
+    "$IWT_ROOT/cli/iwt.sh" vm --help | grep -q "gpu"
+}
+
+test_backend_gpu_functions_exist() {
+    source "$IWT_ROOT/remoteapp/backend/incus-backend.sh"
+    declare -f gpu_attach &>/dev/null
+    declare -f gpu_detach &>/dev/null
+    declare -f gpu_status &>/dev/null
+    declare -f gpu_list_host &>/dev/null
+    declare -f gpu_check_iommu &>/dev/null
+    declare -f looking_glass_check &>/dev/null
+    declare -f looking_glass_launch &>/dev/null
+}
+
+test_gpu_profiles_validate() {
+    "$IWT_ROOT/profiles/validate.sh"
+}
+
+test_gpu_setup_scripts_exist() {
+    [[ -x "$IWT_ROOT/gpu/setup-vfio.sh" ]]
+    [[ -x "$IWT_ROOT/gpu/setup-looking-glass.sh" ]]
+}
+
 test_apps_conf_format() {
     local conf="$IWT_ROOT/remoteapp/freedesktop/apps.conf"
     [[ -f "$conf" ]]
@@ -281,6 +311,11 @@ run_unit_tests() {
     run_test "CLI vm help has share"   test_cli_vm_help_mentions_share
     run_test "Backend share funcs"     test_backend_share_functions_exist
     run_test "shares.conf exists"      test_shares_conf_exists
+    run_test "CLI vm gpu help"         test_cli_vm_gpu_help
+    run_test "CLI vm help has gpu"     test_cli_vm_help_mentions_gpu
+    run_test "Backend gpu funcs"       test_backend_gpu_functions_exist
+    run_test "GPU profiles validate"   test_gpu_profiles_validate
+    run_test "GPU setup scripts exist" test_gpu_setup_scripts_exist
     run_test "apps.conf format"        test_apps_conf_format
 }
 

@@ -653,3 +653,217 @@ share_mount_all() {
     ok "Mounted $mounted shares"
 }
 
+# --- GPU management ---
+
+gpu_list_host() {
+    # List GPUs available on the host via incus info --resources
+    if command -v incus &>/dev/null; then
+        incus info --resources 2>/dev/null | awk '
+            /^  GPUs:/,/^  [A-Z]/ {
+                if (/^  GPUs:/) next
+                if (/^  [A-Z]/ && !/GPU/) exit
+                print
+            }
+        '
+    fi
+
+    # Fallback: lspci
+    if command -v lspci &>/dev/null; then
+        info "PCI GPU devices:"
+        lspci -nn | grep -iE 'vga|3d|display' | sed 's/^/  /'
+    fi
+}
+
+gpu_attach() {
+    local gpu_type="${1:-physical}"
+    local pci_addr="${2:-}"
+    local vendor_id="${3:-}"
+    local product_id="${4:-}"
+    local mdev_profile="${5:-}"
+
+    if ! vm_exists; then
+        die "VM '$IWT_VM_NAME' does not exist"
+    fi
+
+    if vm_is_running; then
+        die "VM must be stopped to attach a GPU (no hotplug support)"
+    fi
+
+    # Remove existing GPU device if present
+    if incus config device show "$IWT_VM_NAME" 2>/dev/null | grep -q "^iwt-gpu:"; then
+        info "Removing existing GPU device"
+        incus config device remove "$IWT_VM_NAME" iwt-gpu
+    fi
+
+    local args=(type=gpu "gputype=$gpu_type")
+
+    case "$gpu_type" in
+        physical)
+            [[ -n "$pci_addr" ]] && args+=("pci=$pci_addr")
+            [[ -n "$vendor_id" ]] && args+=("vendorid=$vendor_id")
+            [[ -n "$product_id" ]] && args+=("productid=$product_id")
+            ;;
+        mdev)
+            [[ -n "$mdev_profile" ]] || die "mdev profile required (--mdev)"
+            args+=("mdev=$mdev_profile")
+            [[ -n "$pci_addr" ]] && args+=("pci=$pci_addr")
+            ;;
+        sriov)
+            [[ -n "$pci_addr" ]] && args+=("pci=$pci_addr")
+            [[ -n "$vendor_id" ]] && args+=("vendorid=$vendor_id")
+            [[ -n "$product_id" ]] && args+=("productid=$product_id")
+            ;;
+        *)
+            die "Unknown GPU type: $gpu_type (use physical, mdev, or sriov)"
+            ;;
+    esac
+
+    info "Attaching $gpu_type GPU to $IWT_VM_NAME"
+    incus config device add "$IWT_VM_NAME" iwt-gpu "${args[@]}"
+    ok "GPU attached. Install GPU drivers in the guest after starting."
+}
+
+gpu_detach() {
+    if ! vm_exists; then
+        die "VM '$IWT_VM_NAME' does not exist"
+    fi
+
+    if vm_is_running; then
+        die "VM must be stopped to detach a GPU"
+    fi
+
+    if ! incus config device show "$IWT_VM_NAME" 2>/dev/null | grep -q "^iwt-gpu:"; then
+        die "No IWT-managed GPU device on $IWT_VM_NAME"
+    fi
+
+    info "Detaching GPU from $IWT_VM_NAME"
+    incus config device remove "$IWT_VM_NAME" iwt-gpu
+    ok "GPU detached"
+}
+
+gpu_status() {
+    if ! vm_exists; then
+        die "VM '$IWT_VM_NAME' does not exist"
+    fi
+
+    local devices
+    devices=$(incus config device show "$IWT_VM_NAME" 2>/dev/null)
+
+    # Check for any GPU device (IWT-managed or from profile)
+    if echo "$devices" | grep -q "gputype:"; then
+        echo "VM:       $IWT_VM_NAME"
+        echo ""
+        echo "$devices" | awk '
+            /gputype:|type: gpu|pci:|vendorid:|productid:|mdev:/ { print "  " $0 }
+            /^[a-z].*:$/ && /gpu/ { print $0 }
+        '
+    else
+        info "No GPU device attached to $IWT_VM_NAME"
+    fi
+}
+
+gpu_check_iommu() {
+    info "Checking IOMMU status..."
+
+    # Check kernel command line
+    if grep -qE '(intel_iommu=on|amd_iommu=on)' /proc/cmdline 2>/dev/null; then
+        ok "IOMMU enabled in kernel command line"
+    else
+        warn "IOMMU not found in kernel command line"
+        warn "Add intel_iommu=on (Intel) or amd_iommu=on (AMD) to GRUB_CMDLINE_LINUX"
+    fi
+
+    # Check for IOMMU groups
+    if [[ -d /sys/kernel/iommu_groups ]]; then
+        local group_count
+        group_count=$(find /sys/kernel/iommu_groups -maxdepth 1 -mindepth 1 -type d | wc -l)
+        if [[ $group_count -gt 0 ]]; then
+            ok "IOMMU active: $group_count groups found"
+        else
+            warn "IOMMU directory exists but no groups found"
+        fi
+    else
+        err "No IOMMU groups found (/sys/kernel/iommu_groups missing)"
+    fi
+
+    # Check for vfio-pci module
+    if lsmod 2>/dev/null | grep -q vfio_pci; then
+        ok "vfio-pci module loaded"
+    else
+        warn "vfio-pci module not loaded (modprobe vfio-pci)"
+    fi
+}
+
+gpu_show_iommu_groups() {
+    # Show IOMMU groups with their devices -- helps identify which GPU to pass through
+    if [[ ! -d /sys/kernel/iommu_groups ]]; then
+        die "No IOMMU groups found. Enable IOMMU first."
+    fi
+
+    for group_dir in /sys/kernel/iommu_groups/*/devices/*; do
+        [[ -e "$group_dir" ]] || continue
+        local group
+        group=$(echo "$group_dir" | grep -oP 'iommu_groups/\K[0-9]+')
+        local pci_addr
+        pci_addr=$(basename "$group_dir")
+        local desc
+        desc=$(lspci -nns "$pci_addr" 2>/dev/null || echo "unknown")
+        printf "  Group %3s: %s %s\n" "$group" "$pci_addr" "$desc"
+    done | sort -t: -k1 -n
+}
+
+looking_glass_check() {
+    info "Checking looking-glass prerequisites..."
+
+    local ok_count=0
+    local fail_count=0
+
+    # Check KVMFR module
+    if [[ -c /dev/kvmfr0 ]]; then
+        ok "KVMFR device (/dev/kvmfr0)"
+        ok_count=$((ok_count + 1))
+    elif [[ -f /dev/shm/looking-glass ]]; then
+        ok "Shared memory file (/dev/shm/looking-glass)"
+        ok_count=$((ok_count + 1))
+    else
+        err "No IVSHMEM device found (/dev/kvmfr0 or /dev/shm/looking-glass)"
+        fail_count=$((fail_count + 1))
+    fi
+
+    # Check looking-glass client
+    if command -v looking-glass-client &>/dev/null; then
+        ok "looking-glass-client found"
+        ok_count=$((ok_count + 1))
+    else
+        err "looking-glass-client not found"
+        fail_count=$((fail_count + 1))
+    fi
+
+    # Check IOMMU
+    gpu_check_iommu
+
+    echo ""
+    info "Results: $ok_count passed, $fail_count failed"
+}
+
+looking_glass_launch() {
+    # Launch the looking-glass client
+    if ! command -v looking-glass-client &>/dev/null; then
+        die "looking-glass-client not found. Install from https://looking-glass.io"
+    fi
+
+    local lg_args=(
+        -f /dev/kvmfr0
+        -s
+        -F
+    )
+
+    # Use /dev/shm fallback if kvmfr0 doesn't exist
+    if [[ ! -c /dev/kvmfr0 ]] && [[ -f /dev/shm/looking-glass ]]; then
+        lg_args=(-f /dev/shm/looking-glass -s -F)
+    fi
+
+    info "Launching looking-glass client"
+    looking-glass-client "${lg_args[@]}" "$@"
+}
+

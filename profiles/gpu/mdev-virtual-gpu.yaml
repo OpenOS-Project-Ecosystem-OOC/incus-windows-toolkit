@@ -1,0 +1,24 @@
+# Incus profile: Mediated Device (mdev) Virtual GPU
+# Creates a virtual GPU slice and passes it to the Windows VM.
+#
+# Supported hardware:
+#   - Intel GVT-g (i915, 5th gen+)
+#   - NVIDIA vGPU (requires NVIDIA vGPU licensed driver)
+#
+# List available mdev profiles:
+#   incus info --resources | grep -A5 mdev
+#
+# Apply as an overlay:
+#   incus profile assign <vm> windows-desktop,mdev-virtual-gpu
+
+description: Mediated device virtual GPU for Windows VM
+devices:
+  gpu:
+    type: gpu
+    gputype: mdev
+    # Set to your mdev profile (required). Examples:
+    #   Intel GVT-g:  i915-GVTg_V5_4
+    #   NVIDIA vGPU:  nvidia-256
+    mdev: "i915-GVTg_V5_4"
+    # Optionally target a specific GPU:
+    # pci: "0000:00:02.0"

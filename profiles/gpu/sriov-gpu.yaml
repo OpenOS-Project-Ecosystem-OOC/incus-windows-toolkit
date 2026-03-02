@@ -1,0 +1,19 @@
+# Incus profile: SR-IOV GPU Passthrough
+# Passes a virtual function of an SR-IOV-enabled GPU to the Windows VM.
+#
+# Supported hardware:
+#   - Intel Data Center GPUs with SR-IOV
+#   - Some NVIDIA enterprise GPUs
+#
+# Apply as an overlay:
+#   incus profile assign <vm> windows-desktop,sriov-gpu
+
+description: SR-IOV GPU virtual function passthrough for Windows VM
+devices:
+  gpu:
+    type: gpu
+    gputype: sriov
+    # Optionally target a specific parent GPU:
+    # pci: "0000:01:00.0"
+    # vendorid: "8086"
+    # productid: "56c0"

@@ -1,0 +1,25 @@
+# Incus profile: VFIO GPU Passthrough
+# Passes an entire physical GPU to the Windows VM.
+#
+# Prerequisites:
+#   - IOMMU enabled in BIOS and kernel (intel_iommu=on / amd_iommu=on)
+#   - GPU bound to vfio-pci driver on the host
+#   - Host must have a second GPU or headless setup
+#
+# Apply as an overlay on top of a base profile:
+#   incus profile assign <vm> windows-desktop,vfio-passthrough
+#
+# To target a specific GPU, override the pci address:
+#   incus config device set <vm> gpu pci=0000:01:00.0
+
+description: VFIO GPU passthrough for Windows VM
+devices:
+  gpu:
+    type: gpu
+    gputype: physical
+    # Uncomment and set to your GPU's PCI address:
+    # pci: "0000:01:00.0"
+    #
+    # Or match by vendor/product ID:
+    # vendorid: "10de"    # NVIDIA
+    # productid: "2484"   # RTX 3070

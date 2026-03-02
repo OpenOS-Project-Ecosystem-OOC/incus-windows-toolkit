@@ -30,70 +30,100 @@ validate_profile() {
         errors=$((errors + 1))
     fi
 
-    if ! grep -q "^config:" "$file"; then
-        err "$file: missing 'config' section"
-        errors=$((errors + 1))
-        return
+    # GPU overlay profiles only need description + devices
+    if [[ "$arch_dir" != "gpu" ]]; then
+        if ! grep -q "^config:" "$file"; then
+            err "$file: missing 'config' section"
+            errors=$((errors + 1))
+            return
+        fi
     fi
 
-    if ! grep -q "^devices:" "$file"; then
+    if ! grep -q "^devices:" "$file" && ! grep -q "devices:" "$file"; then
         err "$file: missing 'devices' section"
         errors=$((errors + 1))
         return
     fi
 
-    # Check required config keys
-    local required_configs=(
-        "security.secureboot"
-        "limits.cpu"
-        "limits.memory"
-    )
+    # GPU overlay profiles have different requirements than base profiles
+    local is_gpu_overlay=false
+    if [[ "$arch_dir" == "gpu" ]]; then
+        is_gpu_overlay=true
+    fi
 
-    for key in "${required_configs[@]}"; do
-        if ! grep -q "$key:" "$file"; then
-            err "$file: missing config key '$key'"
+    if [[ "$is_gpu_overlay" == true ]]; then
+        # GPU profiles must have a gpu device
+        if ! grep -q "gpu:" "$file" && ! grep -q "gputype:" "$file"; then
+            err "$file: GPU profile missing 'gpu' device"
             errors=$((errors + 1))
         fi
-    done
 
-    # Check required devices
-    if ! grep -q "root:" "$file"; then
-        err "$file: missing 'root' disk device"
-        errors=$((errors + 1))
-    fi
-
-    if ! grep -q "eth0:" "$file" && ! grep -q "nic" "$file"; then
-        warn "$file: no network device found"
-        warnings=$((warnings + 1))
-    fi
-
-    # Architecture-specific checks
-    if [[ "$arch_dir" == "x86_64" ]]; then
-        if ! grep -q "hv_" "$file"; then
-            warn "$file: x86_64 profile missing Hyper-V enlightenments (hv_*)"
-            warnings=$((warnings + 1))
+        # Validate gputype is a known value
+        local gputype
+        gputype=$(grep "gputype:" "$file" | awk '{print $2}' | head -1)
+        if [[ -n "$gputype" ]]; then
+            case "$gputype" in
+                physical|mdev|sriov) ;;
+                *)
+                    err "$file: unknown gputype '$gputype' (must be physical, mdev, or sriov)"
+                    errors=$((errors + 1))
+                    ;;
+            esac
         fi
-    fi
+    else
+        # Base profile checks
+        local required_configs=(
+            "security.secureboot"
+            "limits.cpu"
+            "limits.memory"
+        )
 
-    if [[ "$arch_dir" == "arm64" ]]; then
-        if grep -q "hv_" "$file"; then
-            err "$file: ARM64 profile should not have Hyper-V enlightenments"
+        for key in "${required_configs[@]}"; do
+            if ! grep -q "$key:" "$file"; then
+                err "$file: missing config key '$key'"
+                errors=$((errors + 1))
+            fi
+        done
+
+        # Check required devices
+        if ! grep -q "root:" "$file"; then
+            err "$file: missing 'root' disk device"
             errors=$((errors + 1))
         fi
-    fi
 
-    # Desktop profiles should have a display device
-    if [[ "$name" == *desktop* ]]; then
-        if ! grep -q "display:" "$file" && ! grep -q "gpu" "$file"; then
-            warn "$file: desktop profile missing display/gpu device"
+        if ! grep -q "eth0:" "$file" && ! grep -q "nic" "$file"; then
+            warn "$file: no network device found"
             warnings=$((warnings + 1))
         fi
-    fi
 
-    # TPM check for Windows 11
-    if ! grep -q "tpm:" "$file"; then
-        warn "$file: missing TPM device (required for Windows 11)"
-        warnings=$((warnings + 1))
+        # Architecture-specific checks
+        if [[ "$arch_dir" == "x86_64" ]]; then
+            if ! grep -q "hv_" "$file"; then
+                warn "$file: x86_64 profile missing Hyper-V enlightenments (hv_*)"
+                warnings=$((warnings + 1))
+            fi
+        fi
+
+        if [[ "$arch_dir" == "arm64" ]]; then
+            if grep -q "hv_" "$file"; then
+                err "$file: ARM64 profile should not have Hyper-V enlightenments"
+                errors=$((errors + 1))
+            fi
+        fi
+
+        # Desktop profiles should have a display device
+        if [[ "$name" == *desktop* ]]; then
+            if ! grep -q "display:" "$file" && ! grep -q "gpu" "$file"; then
+                warn "$file: desktop profile missing display/gpu device"
+                warnings=$((warnings + 1))
+            fi
+        fi
+
+        # TPM check for Windows 11
+        if ! grep -q "tpm:" "$file"; then
+            warn "$file: missing TPM device (required for Windows 11)"
+            warnings=$((warnings + 1))
+        fi
     fi
 
     ok "$arch_dir/$name"

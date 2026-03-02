@@ -298,6 +298,9 @@ cmd_vm() {
         share)
             cmd_vm_share "$@"
             ;;
+        gpu)
+            cmd_vm_gpu "$@"
+            ;;
         help|--help|-h)
             cat <<EOF
 iwt vm - Manage Windows VMs
@@ -311,6 +314,7 @@ Subcommands:
   rdp [name]          Open full RDP desktop session
   snapshot <action>   Manage VM snapshots
   share <action>      Manage shared folders
+  gpu <action>        Manage GPU passthrough
 
 Create options:
   --name NAME         VM name (default: windows)
@@ -321,10 +325,10 @@ Create options:
 Example:
   iwt vm create --name win11 --image windows-modified.iso
   iwt vm rdp win11
-  iwt vm snapshot create --name pre-update
-  iwt vm share add ~/Projects --drive P
+  iwt vm gpu attach --type physical --pci 0000:01:00.0
+  iwt vm gpu looking-glass
 
-Run 'iwt vm snapshot --help' or 'iwt vm share --help' for details.
+Run 'iwt vm snapshot --help', 'iwt vm share --help', or 'iwt vm gpu --help' for details.
 EOF
             ;;
         *)
@@ -665,6 +669,115 @@ EOF
     esac
 }
 
+cmd_vm_gpu() {
+    local subcmd="${1:-help}"
+    shift || true
+
+    case "$subcmd" in
+        attach)
+            local gpu_type="physical"
+            local pci_addr=""
+            local vendor_id=""
+            local product_id=""
+            local mdev_profile=""
+            local vm_name=""
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --type)      gpu_type="$2"; shift 2 ;;
+                    --pci)       pci_addr="$2"; shift 2 ;;
+                    --vendor)    vendor_id="$2"; shift 2 ;;
+                    --product)   product_id="$2"; shift 2 ;;
+                    --mdev)      mdev_profile="$2"; shift 2 ;;
+                    --vm)        vm_name="$2"; shift 2 ;;
+                    *)           err "Unknown option: $1"; exit 1 ;;
+                esac
+            done
+
+            [[ -n "$vm_name" ]] && IWT_VM_NAME="$vm_name"
+            gpu_attach "$gpu_type" "$pci_addr" "$vendor_id" "$product_id" "$mdev_profile"
+            ;;
+        detach)
+            local vm_name=""
+            [[ "${1:-}" == "--vm" ]] && { vm_name="$2"; shift 2; }
+            [[ -n "$vm_name" ]] && IWT_VM_NAME="$vm_name"
+            gpu_detach
+            ;;
+        status)
+            local vm_name=""
+            [[ "${1:-}" == "--vm" ]] && { vm_name="$2"; shift 2; }
+            [[ -n "${1:-}" && "${1:-}" != -* ]] && { vm_name="$1"; shift; }
+            [[ -n "$vm_name" ]] && IWT_VM_NAME="$vm_name"
+            gpu_status
+            ;;
+        list-host)
+            gpu_list_host
+            ;;
+        iommu)
+            local subcmd2="${1:-check}"
+            shift || true
+            case "$subcmd2" in
+                check)  gpu_check_iommu ;;
+                groups) gpu_show_iommu_groups ;;
+                *)      err "Unknown iommu subcommand: $subcmd2"; exit 1 ;;
+            esac
+            ;;
+        looking-glass|lg)
+            local subcmd2="${1:-launch}"
+            shift || true
+            case "$subcmd2" in
+                check)  looking_glass_check ;;
+                launch) looking_glass_launch "$@" ;;
+                *)      err "Unknown looking-glass subcommand: $subcmd2"; exit 1 ;;
+            esac
+            ;;
+        help|--help|-h)
+            cat <<EOF
+iwt vm gpu - Manage GPU passthrough
+
+Subcommands:
+  attach [options]        Attach a GPU to the VM (VM must be stopped)
+  detach                  Remove GPU from the VM
+  status                  Show GPU device status
+  list-host               List GPUs available on the host
+  iommu check             Check IOMMU status
+  iommu groups            Show IOMMU groups and devices
+  looking-glass check     Check looking-glass prerequisites
+  looking-glass launch    Launch looking-glass client
+
+Attach options:
+  --type TYPE             physical | mdev | sriov (default: physical)
+  --pci ADDRESS           PCI address (e.g. 0000:01:00.0)
+  --vendor ID             Vendor ID (e.g. 10de for NVIDIA)
+  --product ID            Product ID
+  --mdev PROFILE          mdev profile name (required for --type mdev)
+  --vm NAME               Target VM
+
+GPU profiles (apply as overlays):
+  vfio-passthrough        Full physical GPU passthrough
+  mdev-virtual-gpu        Intel GVT-g / NVIDIA vGPU
+  sriov-gpu               SR-IOV virtual function
+  looking-glass           VFIO + IVSHMEM for looking-glass
+
+Examples:
+  iwt vm gpu list-host
+  iwt vm gpu iommu check
+  iwt vm gpu iommu groups
+  iwt vm gpu attach --type physical --pci 0000:01:00.0
+  iwt vm gpu attach --type mdev --mdev i915-GVTg_V5_4
+  iwt vm gpu status
+  iwt vm gpu detach
+  iwt vm gpu looking-glass check
+  iwt vm gpu looking-glass launch
+EOF
+            ;;
+        *)
+            err "Unknown gpu subcommand: $subcmd"
+            exit 1
+            ;;
+    esac
+}
+
 # --- Profile commands ---
 
 cmd_profiles() {
@@ -739,10 +852,12 @@ EOF
 
 cmd_profiles_install() {
     local arch=""
+    local include_gpu=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --arch) arch="$2"; shift 2 ;;
+            --gpu)  include_gpu=true; shift ;;
             *)      err "Unknown option: $1"; exit 1 ;;
         esac
     done
@@ -758,6 +873,7 @@ cmd_profiles_install() {
 
     require_cmd incus
 
+    # Install arch-specific profiles
     for profile_file in "$profile_dir"/*.yaml; do
         local profile_name
         profile_name=$(basename "$profile_file" .yaml)
@@ -772,6 +888,27 @@ cmd_profiles_install() {
             ok "Created: $profile_name"
         fi
     done
+
+    # Install GPU overlay profiles if requested
+    if [[ "$include_gpu" == true ]]; then
+        local gpu_dir="$IWT_ROOT/profiles/gpu"
+        if [[ -d "$gpu_dir" ]]; then
+            for profile_file in "$gpu_dir"/*.yaml; do
+                local profile_name
+                profile_name=$(basename "$profile_file" .yaml)
+                info "Installing GPU profile: $profile_name"
+
+                if incus profile show "$profile_name" &>/dev/null; then
+                    incus profile edit "$profile_name" < "$profile_file"
+                    ok "Updated: $profile_name"
+                else
+                    incus profile create "$profile_name"
+                    incus profile edit "$profile_name" < "$profile_file"
+                    ok "Created: $profile_name"
+                fi
+            done
+        fi
+    fi
 }
 
 # --- RemoteApp commands ---
@@ -848,7 +985,7 @@ _iwt_completions() {
             COMPREPLY=($(compgen -W "download build list help" -- "$cur"))
             ;;
         vm)
-            COMPREPLY=($(compgen -W "create start stop status list rdp snapshot share help" -- "$cur"))
+            COMPREPLY=($(compgen -W "create start stop status list rdp snapshot share gpu help" -- "$cur"))
             ;;
         profiles)
             COMPREPLY=($(compgen -W "install list show diff help" -- "$cur"))
@@ -883,7 +1020,7 @@ _iwt() {
         args)
             case $words[1] in
                 image)     _values 'subcommand' download build list help ;;
-                vm)        _values 'subcommand' create start stop status list rdp snapshot share help ;;
+                vm)        _values 'subcommand' create start stop status list rdp snapshot share gpu help ;;
                 profiles)  _values 'subcommand' install list show diff help ;;
                 remoteapp) _values 'subcommand' launch install discover config help ;;
                 config)    _values 'subcommand' init show edit path help ;;

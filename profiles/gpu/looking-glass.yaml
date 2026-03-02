@@ -1,0 +1,43 @@
+# Incus profile: Looking Glass (VFIO + IVSHMEM)
+# Full GPU passthrough with looking-glass for near-native display output
+# on the Linux host without a physical monitor on the GPU.
+#
+# How it works:
+#   1. Physical GPU is passed to the VM via VFIO
+#   2. IVSHMEM device provides shared memory between host and guest
+#   3. Looking-glass host app (in Windows) captures the GPU framebuffer
+#      and writes it to shared memory
+#   4. Looking-glass client (on Linux) reads shared memory and displays it
+#
+# Prerequisites:
+#   - IOMMU enabled, GPU bound to vfio-pci
+#   - KVMFR kernel module loaded (or /dev/shm/looking-glass configured)
+#   - looking-glass-client installed on host
+#   - looking-glass-host.exe installed in Windows guest
+#
+# Apply as an overlay:
+#   incus profile assign <vm> windows-desktop,looking-glass
+#
+# Setup:
+#   iwt vm gpu looking-glass setup
+
+description: VFIO GPU passthrough with looking-glass IVSHMEM display
+config:
+  # IVSHMEM device for looking-glass shared memory framebuffer.
+  # Size formula: width * height * 4 * 2, rounded up to power of 2.
+  # 64M covers up to 4K (3840x2160). Use 128M for multi-monitor.
+  raw.qemu: >-
+    -device ivshmem-plain,memdev=ivshmem,bus=pci.0
+    -object memory-backend-file,id=ivshmem,share=on,mem-path=/dev/kvmfr0,size=128M
+
+devices:
+  gpu:
+    type: gpu
+    gputype: physical
+    # Set to your GPU's PCI address:
+    # pci: "0000:01:00.0"
+
+  # Pass through the GPU's audio device (usually PCI function .1)
+  # gpu-audio:
+  #   type: pci
+  #   address: "0000:01:00.1"
