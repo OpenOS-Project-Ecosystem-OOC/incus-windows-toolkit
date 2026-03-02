@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.1.0
+
+### Auto-Update
+- `iwt update check` — check GitHub for new releases with semver comparison
+- `iwt update install` — self-update via git pull or tarball download
+
+### App Store
+- `iwt apps list/show/install` — curated winget app bundles
+- 6 bundles: dev, gaming, office, creative, sysadmin, security
+- `iwt apps search` — search winget inside the VM
+- `iwt apps install-app` — install individual apps by winget ID
+
+### Cloud Sync
+- `iwt cloud push/pull` — sync backups to S3, B2, or any rclone remote
+- `iwt cloud config` — configure remote storage (S3, B2, interactive)
+- `iwt cloud status` — show sync status with unsynced file detection
+- `iwt cloud list` — list remote backups
+
+### Web Dashboard
+- `iwt dashboard` — lightweight HTTP monitoring UI on port 8420
+- Dark-themed single-page app with auto-refresh every 5 seconds
+- VM table with status, template, CPU, memory, disk, IP
+- System cards: running VMs, host memory, host disk, IWT version
+- JSON API at `/api/vms` for integration
+- Works with socat, ncat, or python3
+
+### Security Hardening
+- `iwt vm harden` — apply security measures to VMs
+- Secure Boot, TPM 2.0, network isolation, read-only snapshots
+- `iwt vm harden --check` — audit current security posture
+- Guest-side checks: Windows Defender, Firewall, BitLocker, UAC
+- AppArmor profile for the iwt CLI (`security/apparmor-iwt`)
+
+### Integration Tests
+- 8 new integration tests: template create, backup/restore, export/import,
+  monitor health, fleet list (require Incus)
+
+### Community
+- Issue templates (bug report, feature request)
+- CONTRIBUTING.md with development setup and code style guide
+- CI badges in README (build status, release version, license)
+
 ## v1.0.0
 
 Initial release of the Incus Windows Toolkit.

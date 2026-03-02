@@ -146,7 +146,9 @@ test_download_help() {
 }
 
 test_cli_image_list() {
-    "$IWT_ROOT/cli/iwt.sh" image list | grep -q "Consumer"
+    local output
+    output=$("$IWT_ROOT/cli/iwt.sh" image list 2>&1)
+    echo "$output" | grep -q "Consumer"
 }
 
 test_cli_image_download_help() {
@@ -630,6 +632,166 @@ test_tui_has_monitor_menu() {
     grep -q 'menu_monitor' "$IWT_ROOT/tui/iwt-tui.sh"
 }
 
+# --- Update tests ---
+
+test_update_script_exists() {
+    [[ -x "$IWT_ROOT/cli/update.sh" ]]
+}
+
+test_update_help() {
+    local output
+    output=$("$IWT_ROOT/cli/update.sh" help 2>&1)
+    echo "$output" | grep -q 'check'
+    echo "$output" | grep -q 'install'
+}
+
+test_cli_update_dispatch() {
+    grep -q 'update)' "$IWT_ROOT/cli/iwt.sh"
+    grep -q 'update.sh' "$IWT_ROOT/cli/iwt.sh"
+}
+
+test_cli_help_mentions_update() {
+    local output
+    output=$("$IWT_ROOT/cli/iwt.sh" help 2>&1)
+    echo "$output" | grep -q 'update'
+}
+
+# --- App store tests ---
+
+test_app_store_script_exists() {
+    [[ -x "$IWT_ROOT/guest/app-store.sh" ]]
+}
+
+test_app_store_help() {
+    local output
+    output=$("$IWT_ROOT/guest/app-store.sh" help 2>&1)
+    echo "$output" | grep -q 'install'
+    echo "$output" | grep -q 'search'
+}
+
+test_app_store_list() {
+    local output
+    output=$("$IWT_ROOT/guest/app-store.sh" list 2>&1)
+    echo "$output" | grep -q 'dev'
+    echo "$output" | grep -q 'gaming'
+}
+
+test_cli_apps_dispatch() {
+    grep -q 'apps)' "$IWT_ROOT/cli/iwt.sh"
+    grep -q 'app-store.sh' "$IWT_ROOT/cli/iwt.sh"
+}
+
+test_cli_help_mentions_apps() {
+    local output
+    output=$("$IWT_ROOT/cli/iwt.sh" help 2>&1)
+    echo "$output" | grep -q 'apps'
+}
+
+# --- Cloud sync tests ---
+
+test_cloud_sync_script_exists() {
+    [[ -x "$IWT_ROOT/cli/cloud-sync.sh" ]]
+}
+
+test_cloud_sync_help() {
+    local output
+    output=$("$IWT_ROOT/cli/cloud-sync.sh" help 2>&1)
+    echo "$output" | grep -q 'push'
+    echo "$output" | grep -q 'pull'
+}
+
+test_cli_cloud_dispatch() {
+    grep -q 'cloud)' "$IWT_ROOT/cli/iwt.sh"
+    grep -q 'cloud-sync.sh' "$IWT_ROOT/cli/iwt.sh"
+}
+
+test_cli_help_mentions_cloud() {
+    local output
+    output=$("$IWT_ROOT/cli/iwt.sh" help 2>&1)
+    echo "$output" | grep -q 'cloud'
+}
+
+# --- Dashboard tests ---
+
+test_dashboard_script_exists() {
+    [[ -x "$IWT_ROOT/cli/web-dashboard.sh" ]]
+}
+
+test_dashboard_help() {
+    local output
+    output=$("$IWT_ROOT/cli/web-dashboard.sh" --help 2>&1)
+    echo "$output" | grep -q 'port'
+}
+
+test_dashboard_html_output() {
+    local output
+    output=$("$IWT_ROOT/cli/web-dashboard.sh" --html 2>&1)
+    echo "$output" | grep -q 'IWT Dashboard'
+    echo "$output" | grep -q '<table>'
+}
+
+test_cli_dashboard_dispatch() {
+    grep -q 'dashboard)' "$IWT_ROOT/cli/iwt.sh"
+    grep -q 'web-dashboard.sh' "$IWT_ROOT/cli/iwt.sh"
+}
+
+test_cli_help_mentions_dashboard() {
+    local output
+    output=$("$IWT_ROOT/cli/iwt.sh" help 2>&1)
+    echo "$output" | grep -q 'dashboard'
+}
+
+# --- Hardening tests ---
+
+test_harden_script_exists() {
+    [[ -x "$IWT_ROOT/security/harden-vm.sh" ]]
+}
+
+test_harden_help() {
+    local output
+    output=$("$IWT_ROOT/security/harden-vm.sh" --help 2>&1)
+    echo "$output" | grep -q 'secure-boot'
+    echo "$output" | grep -q 'tpm'
+}
+
+test_apparmor_profile_exists() {
+    [[ -f "$IWT_ROOT/security/apparmor-iwt" ]]
+}
+
+test_cli_vm_harden_dispatch() {
+    grep -q 'harden)' "$IWT_ROOT/cli/iwt.sh"
+    grep -q 'harden-vm.sh' "$IWT_ROOT/cli/iwt.sh"
+}
+
+test_cli_vm_help_mentions_harden() {
+    local output
+    output=$("$IWT_ROOT/cli/iwt.sh" vm help 2>&1)
+    echo "$output" | grep -q 'harden'
+}
+
+# --- Community files tests ---
+
+test_contributing_exists() {
+    [[ -f "$IWT_ROOT/CONTRIBUTING.md" ]]
+}
+
+test_issue_templates_exist() {
+    [[ -f "$IWT_ROOT/.github/ISSUE_TEMPLATE/bug_report.md" ]]
+    [[ -f "$IWT_ROOT/.github/ISSUE_TEMPLATE/feature_request.md" ]]
+}
+
+test_readme_has_badges() {
+    grep -q 'badge.svg' "$IWT_ROOT/README.md"
+}
+
+test_changelog_exists() {
+    [[ -f "$IWT_ROOT/CHANGELOG.md" ]]
+}
+
+test_license_exists() {
+    [[ -f "$IWT_ROOT/LICENSE" ]]
+}
+
 # --- Lint ---
 
 test_shellcheck() {
@@ -665,6 +827,79 @@ test_incus_snapshot_lifecycle() {
 
     # Cleanup
     incus delete "$name" --force
+}
+
+test_incus_template_create() {
+    local name="iwt-tpl-test-$$"
+    "$IWT_ROOT/cli/iwt.sh" vm create --template minimal --name "$name"
+
+    # Verify template metadata was stored
+    local tpl
+    tpl=$(incus config get "$name" user.iwt.template 2>/dev/null || echo "")
+    [[ "$tpl" == "minimal" ]]
+
+    # Verify resource overrides applied
+    local cpu
+    cpu=$(incus config get "$name" limits.cpu 2>/dev/null || echo "")
+    [[ "$cpu" == "2" ]]
+
+    incus delete "$name" --force
+}
+
+test_incus_backup_restore() {
+    local name="iwt-bak-test-$$"
+    "$IWT_ROOT/cli/iwt.sh" vm create --name "$name"
+
+    # Create backup
+    local output
+    output=$(IWT_VM_NAME="$name" "$IWT_ROOT/cli/backup.sh" create "$name" 2>&1)
+    echo "$output" | grep -q "Backup created"
+
+    # List backups
+    "$IWT_ROOT/cli/backup.sh" list | grep -q "$name"
+
+    # Cleanup VM
+    incus delete "$name" --force
+
+    # Restore from backup
+    local backup_file
+    backup_file=$(find "${IWT_BACKUP_DIR:-$HOME/.local/share/iwt/backups}" -name "${name}-*" -print -quit 2>/dev/null || true)
+    if [[ -n "$backup_file" ]]; then
+        "$IWT_ROOT/cli/backup.sh" restore "$backup_file" --name "$name"
+        incus info "$name" | grep -q "Status:"
+        incus delete "$name" --force
+        # Clean up backup
+        "$IWT_ROOT/cli/backup.sh" delete "$(basename "$backup_file")"
+    fi
+}
+
+test_incus_export_import() {
+    local name="iwt-exp-test-$$"
+    "$IWT_ROOT/cli/iwt.sh" vm create --name "$name"
+
+    # Export as image
+    local alias="iwt-test-image-$$"
+    source "$IWT_ROOT/cli/backup.sh"
+    IWT_VM_NAME="$name" cmd_export "$name" --alias "$alias"
+
+    # Verify image exists
+    incus image info "$alias" | grep -q "Architecture:"
+
+    # Cleanup
+    incus delete "$name" --force
+    incus image delete "$alias"
+}
+
+test_incus_monitor_health() {
+    local output
+    output=$("$IWT_ROOT/cli/monitor.sh" health 2>&1)
+    echo "$output" | grep -q "Incus daemon"
+}
+
+test_incus_fleet_list() {
+    local output
+    output=$("$IWT_ROOT/cli/fleet.sh" list 2>&1)
+    echo "$output" | grep -q "VMs\|No VMs"
 }
 
 # --- Runner ---
@@ -774,6 +1009,34 @@ run_unit_tests() {
     run_test "CLI help fleet"          test_cli_help_mentions_fleet
     run_test "TUI has fleet"           test_tui_has_fleet_menu
     run_test "TUI has monitor"         test_tui_has_monitor_menu
+    run_test "Update script"           test_update_script_exists
+    run_test "Update help"             test_update_help
+    run_test "CLI update dispatch"     test_cli_update_dispatch
+    run_test "CLI help update"         test_cli_help_mentions_update
+    run_test "App store script"        test_app_store_script_exists
+    run_test "App store help"          test_app_store_help
+    run_test "App store list"          test_app_store_list
+    run_test "CLI apps dispatch"       test_cli_apps_dispatch
+    run_test "CLI help apps"           test_cli_help_mentions_apps
+    run_test "Cloud sync script"       test_cloud_sync_script_exists
+    run_test "Cloud sync help"         test_cloud_sync_help
+    run_test "CLI cloud dispatch"      test_cli_cloud_dispatch
+    run_test "CLI help cloud"          test_cli_help_mentions_cloud
+    run_test "Dashboard script"        test_dashboard_script_exists
+    run_test "Dashboard help"          test_dashboard_help
+    run_test "Dashboard HTML"          test_dashboard_html_output
+    run_test "CLI dashboard dispatch"  test_cli_dashboard_dispatch
+    run_test "CLI help dashboard"      test_cli_help_mentions_dashboard
+    run_test "Harden script"           test_harden_script_exists
+    run_test "Harden help"             test_harden_help
+    run_test "AppArmor profile"        test_apparmor_profile_exists
+    run_test "CLI vm harden"           test_cli_vm_harden_dispatch
+    run_test "CLI vm help harden"      test_cli_vm_help_mentions_harden
+    run_test "CONTRIBUTING.md"         test_contributing_exists
+    run_test "Issue templates"         test_issue_templates_exist
+    run_test "README badges"           test_readme_has_badges
+    run_test "CHANGELOG exists"        test_changelog_exists
+    run_test "LICENSE exists"          test_license_exists
 }
 
 run_lint() {
@@ -801,6 +1064,11 @@ run_integration_tests() {
     run_test "Incus profiles install"  test_incus_profiles_install
     run_test "Incus VM create/delete"  test_incus_vm_create_delete
     run_test "Incus snapshot lifecycle" test_incus_snapshot_lifecycle
+    run_test "Incus template create"   test_incus_template_create
+    run_test "Incus backup/restore"    test_incus_backup_restore
+    run_test "Incus export/import"     test_incus_export_import
+    run_test "Incus monitor health"    test_incus_monitor_health
+    run_test "Incus fleet list"        test_incus_fleet_list
 }
 
 # --- Main ---

@@ -1,0 +1,64 @@
+# AppArmor profile for IWT (Incus Windows Toolkit)
+#
+# Install:
+#   sudo cp security/apparmor-iwt /etc/apparmor.d/iwt
+#   sudo apparmor_parser -r /etc/apparmor.d/iwt
+#
+# This profile restricts the iwt CLI to only the operations it needs.
+
+#include <tunables/global>
+
+profile iwt /usr/local/bin/iwt flags=(complain) {
+  #include <abstractions/base>
+  #include <abstractions/bash>
+  #include <abstractions/nameservice>
+
+  # IWT installation directory
+  /usr/local/share/iwt/** r,
+  /usr/local/share/iwt/**/*.sh ix,
+
+  # User config and cache
+  owner @{HOME}/.config/iwt/** rw,
+  owner @{HOME}/.cache/iwt/** rw,
+  owner @{HOME}/.local/share/iwt/** rw,
+
+  # Incus socket
+  /var/lib/incus/unix.socket rw,
+
+  # Incus CLI
+  /usr/bin/incus ix,
+  /usr/local/bin/incus ix,
+  /snap/bin/incus ix,
+
+  # Required tools
+  /usr/bin/curl ix,
+  /usr/bin/jq ix,
+  /usr/bin/qemu-img ix,
+  /usr/bin/wimlib-imagex ix,
+  /usr/bin/xorriso ix,
+  /usr/bin/xfreerdp ix,
+  /usr/bin/xfreerdp3 ix,
+  /usr/bin/dialog ix,
+  /usr/bin/whiptail ix,
+  /usr/bin/socat ix,
+  /usr/bin/rclone ix,
+  /usr/bin/cabextract ix,
+
+  # Temp directories
+  /tmp/** rw,
+  owner /tmp/** rw,
+
+  # Mount operations (for VirtIO ISO)
+  capability sys_admin,
+  mount,
+  umount,
+
+  # Deny network access except for specific tools
+  # (curl, rclone handle their own network access)
+  deny network raw,
+
+  # Deny write to system directories
+  deny /etc/** w,
+  deny /usr/** w,
+  deny /boot/** w,
+}

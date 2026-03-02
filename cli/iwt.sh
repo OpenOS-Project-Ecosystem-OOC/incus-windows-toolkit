@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # Resolve install location
 if [[ -L "${BASH_SOURCE[0]}" ]]; then
@@ -39,10 +39,14 @@ Usage: iwt <command> [subcommand] [options]
 Commands:
   image       Build and manage Windows VM images
   vm          Create, start, stop, and manage Windows VMs
+  apps        Windows app store (install app bundles via winget)
+  cloud       Sync backups to cloud storage (S3, B2, rclone)
   fleet       Multi-VM orchestration (start-all, stop-all, backup-all)
   profiles    Install and manage Incus VM profiles
   remoteapp   Launch Windows apps as seamless Linux windows
   tui         Launch interactive terminal UI
+  dashboard   Launch web monitoring dashboard
+  update      Check for updates and self-update
   doctor      Check system prerequisites
   config      Manage IWT configuration
   version     Show version
@@ -336,6 +340,9 @@ cmd_vm() {
         monitor)
             exec "$IWT_ROOT/cli/monitor.sh" "$@"
             ;;
+        harden)
+            exec "$IWT_ROOT/security/harden-vm.sh" "$@"
+            ;;
         help|--help|-h)
             cat <<EOF
 iwt vm - Manage Windows VMs
@@ -354,6 +361,7 @@ Subcommands:
   import <path>       Import VM from backup or image
   first-boot [opts]   Run first-boot PowerShell scripts in a VM
   monitor <action>    VM resource monitoring and stats
+  harden [opts]       Security hardening (Secure Boot, TPM, isolation)
   snapshot <action>   Manage VM snapshots
   share <action>      Manage shared folders
   gpu <action>        Manage GPU passthrough
@@ -1537,10 +1545,14 @@ main() {
     case "$cmd" in
         image)      cmd_image "$@" ;;
         vm)         cmd_vm "$@" ;;
+        apps)       exec "$IWT_ROOT/guest/app-store.sh" "$@" ;;
+        cloud)      exec "$IWT_ROOT/cli/cloud-sync.sh" "$@" ;;
         fleet)      exec "$IWT_ROOT/cli/fleet.sh" "$@" ;;
         profiles)   cmd_profiles "$@" ;;
         remoteapp)  cmd_remoteapp "$@" ;;
         tui)        exec "$IWT_ROOT/tui/iwt-tui.sh" "$@" ;;
+        dashboard)  exec "$IWT_ROOT/cli/web-dashboard.sh" "$@" ;;
+        update)     exec "$IWT_ROOT/cli/update.sh" "$@" ;;
         doctor)     cmd_doctor "$@" ;;
         config)     cmd_config "$@" ;;
         completion) cmd_completion "$@" ;;
