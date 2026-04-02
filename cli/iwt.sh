@@ -639,6 +639,15 @@ cmd_vm_storage() {
         bdfs-check)
             exec "$IWT_ROOT/storage/setup-bdfs.sh" check "$@"
             ;;
+        bdfs-share)
+            exec "$IWT_ROOT/storage/setup-bdfs.sh" share "$@"
+            ;;
+        bdfs-unshare)
+            exec "$IWT_ROOT/storage/setup-bdfs.sh" unshare "$@"
+            ;;
+        bdfs-list-shares)
+            exec "$IWT_ROOT/storage/setup-bdfs.sh" list-shares "$@"
+            ;;
 
         # EROFS subcommands
         erofs-pack)
@@ -722,6 +731,9 @@ bdfs subcommands (btrfs-dwarfs-framework hybrid storage):
   bdfs-snapshot     CoW snapshot of a DwarFS image's BTRFS container
   bdfs-promote      Make a DwarFS-backed path writable (extract to BTRFS)
   bdfs-demote       Compress a BTRFS subvolume into a DwarFS image
+  bdfs-share        Expose a blend namespace to a Windows VM via virtiofs
+  bdfs-unshare      Remove a blend virtiofs share from a VM
+  bdfs-list-shares  List active bdfs virtiofs shares
   bdfs-status       Show bdfs partition and blend status
   bdfs-daemon       start|stop|status bdfs_daemon
   bdfs-check        Verify bdfs host prerequisites

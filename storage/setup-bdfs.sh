@@ -608,6 +608,183 @@ cmd_check() {
     [[ $fail_count -eq 0 ]]
 }
 
+# --- Share / unshare blend namespace with a Windows VM ---
+
+cmd_share() {
+    local blend_mount="" vm_name="" share_name="" writeback=false auto_mount=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --blend-mount)  blend_mount="$2"; shift 2 ;;
+            --vm)           vm_name="$2";     shift 2 ;;
+            --name)         share_name="$2";  shift 2 ;;
+            --writeback)    writeback=true;   shift   ;;
+            --auto-mount)   auto_mount=true;  shift   ;;
+            --help|-h)      _usage_share; exit 0 ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    [[ -n "$blend_mount" ]] || die "--blend-mount is required (path to an active bdfs blend mountpoint)"
+    [[ -n "$vm_name"     ]] || die "--vm is required"
+    [[ -n "$share_name"  ]] || share_name="$(basename "$blend_mount")"
+
+    _require_bdfs
+    _require_fuse
+
+    echo ""
+    bold "bdfs share"
+    info "Blend mount: $blend_mount"
+    info "VM:          $vm_name"
+    info "Share name:  $share_name"
+    info "Writeback:   $writeback"
+    echo ""
+
+    # Verify the blend namespace is actually mounted
+    if ! mountpoint -q "$blend_mount" 2>/dev/null; then
+        if [[ "$auto_mount" == true ]]; then
+            die "Blend namespace is not mounted at '$blend_mount'.\n  Mount it first with: iwt vm storage bdfs-blend mount --mountpoint $blend_mount ..."
+        else
+            die "Blend namespace is not mounted at '$blend_mount'.\n  Mount it first with: iwt vm storage bdfs-blend mount --mountpoint $blend_mount ...\n  Or pass --auto-mount to fail with a clearer message."
+        fi
+    fi
+
+    # Verify the VM exists
+    incus info "$vm_name" &>/dev/null || die "VM '$vm_name' not found"
+
+    # Reject duplicate share names on the same VM
+    if incus config device show "$vm_name" 2>/dev/null | grep -q "^${share_name}:"; then
+        die "Device '$share_name' is already attached to '$vm_name'. Use --name to choose a different name."
+    fi
+
+    # Attach the blend mountpoint to the VM as a virtiofs disk share.
+    # writeback=false (the default) means the virtiofs mount inside Windows is
+    # read-write but cache coherency is strict — safer for a CoW upper layer.
+    # writeback=true enables virtiofs writeback caching for better throughput at
+    # the cost of stricter ordering guarantees.
+    local cache_mode="none"
+    [[ "$writeback" == true ]] && cache_mode="writeback"
+
+    incus config device add "$vm_name" "$share_name" disk \
+        source="$blend_mount" \
+        path="/mnt/${share_name}" \
+        || die "Failed to attach virtiofs share to VM '$vm_name'"
+
+    ok "Share '$share_name' attached to '$vm_name'"
+
+    # Persist state so bdfs-unshare and list-shares can clean up
+    local state_dir="${IWT_BDFS_RUNTIME:-/run/iwt/bdfs}"
+    mkdir -p "$state_dir"
+    echo "${blend_mount}|${vm_name}|${share_name}|${cache_mode}" \
+        >> "${state_dir}/shares.state"
+
+    echo ""
+    ok "bdfs blend namespace ready for Windows"
+    info "Inside the Windows guest:"
+    info "  - The share appears as a new disk via WinFsp / virtio-fs"
+    info "  - Mount it with a drive letter: iwt-mount-shares.ps1 ${share_name} Z"
+    info "  - Writes land on the BTRFS upper layer on the host"
+    info ""
+    info "To reclaim space after heavy writes, demote accumulated changes:"
+    info "  iwt vm storage bdfs-demote --blend-path ${blend_mount}/<subvol> --image-name <name>"
+}
+
+cmd_unshare() {
+    local vm_name="" share_name=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --vm)     vm_name="$2";    shift 2 ;;
+            --name)   share_name="$2"; shift 2 ;;
+            --help|-h) echo "Usage: iwt vm storage bdfs-unshare --vm NAME --name SHARE"; exit 0 ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    [[ -n "$vm_name"    ]] || die "--vm is required"
+    [[ -n "$share_name" ]] || die "--name is required"
+
+    echo ""
+    bold "bdfs unshare"
+    info "VM:         $vm_name"
+    info "Share name: $share_name"
+    echo ""
+
+    # Detach from VM
+    if incus config device show "$vm_name" 2>/dev/null | grep -q "^${share_name}:"; then
+        incus config device remove "$vm_name" "$share_name"
+        ok "Detached '$share_name' from '$vm_name'"
+    else
+        warn "Share '$share_name' not found on '$vm_name' — may already be detached"
+    fi
+
+    # Remove from state file
+    local state_file="${IWT_BDFS_RUNTIME:-/run/iwt/bdfs}/shares.state"
+    if [[ -f "$state_file" ]]; then
+        grep -v "|${vm_name}|${share_name}|" "$state_file" > "${state_file}.tmp" || true
+        mv "${state_file}.tmp" "$state_file"
+    fi
+
+    ok "Share '$share_name' removed"
+    info "The blend namespace itself is still mounted on the host."
+    info "To unmount it: iwt vm storage bdfs-blend umount <mountpoint>"
+}
+
+cmd_list_shares() {
+    echo ""
+    bold "Active bdfs Shares:"
+    echo ""
+
+    local state_file="${IWT_BDFS_RUNTIME:-/run/iwt/bdfs}/shares.state"
+    if [[ ! -f "$state_file" ]] || [[ ! -s "$state_file" ]]; then
+        info "No active bdfs shares"
+        return 0
+    fi
+
+    printf "  %-20s %-15s %-10s %s\n" "SHARE" "VM" "CACHE" "BLEND MOUNT"
+    printf "  %-20s %-15s %-10s %s\n" "-----" "--" "-----" "-----------"
+
+    while IFS='|' read -r blend_mount vm_name share_name cache_mode; do
+        [[ -n "$share_name" ]] || continue
+        local mounted="no"
+        mountpoint -q "$blend_mount" 2>/dev/null && mounted="yes"
+        local attached="no"
+        incus config device show "$vm_name" 2>/dev/null | grep -q "^${share_name}:" && attached="yes"
+        printf "  %-20s %-15s %-10s %s (blend mounted: %s, vm attached: %s)\n" \
+            "$share_name" "$vm_name" "${cache_mode:-none}" "$blend_mount" "$mounted" "$attached"
+    done < "$state_file"
+}
+
+_usage_share() {
+    cat <<EOF
+iwt vm storage bdfs-share - Expose a bdfs blend namespace to a Windows VM via virtiofs
+
+The blend namespace must already be mounted on the host before calling this.
+Windows accesses it through WinFsp as a drive letter — the BTRFS+DwarFS
+layer underneath is transparent. Writes from Windows land on the BTRFS upper
+layer; use bdfs-demote to recompress them back to DwarFS.
+
+Options:
+  --blend-mount PATH   Path to an active bdfs blend mountpoint  (required)
+  --vm          NAME   Target VM name                           (required)
+  --name        NAME   Share name visible in Incus              (default: basename of blend-mount)
+  --writeback          Enable virtiofs writeback cache (higher throughput, less strict ordering)
+
+Examples:
+  # Mount the blend namespace first, then share it
+  iwt vm storage bdfs-blend mount \\
+      --btrfs-uuid <uuid> --dwarfs-uuid <uuid> --mountpoint /mnt/blend --writeback
+
+  iwt vm storage bdfs-share --blend-mount /mnt/blend --vm win11 --name win-data
+
+  # Remove the share (blend namespace stays mounted on host)
+  iwt vm storage bdfs-unshare --vm win11 --name win-data
+
+  # List all active bdfs shares
+  iwt vm storage bdfs-list-shares
+EOF
+}
+
 # --- Helpers ---
 
 _require_bdfs() {
@@ -631,17 +808,20 @@ setup-bdfs.sh - bdfs (btrfs-dwarfs-framework) integration for IWT
 Usage: setup-bdfs.sh <subcommand> [options]
 
 Subcommands:
-  partition  add|remove|list|show   Manage bdfs partitions
-  blend      mount|umount           Manage the BTRFS+DwarFS blend namespace
-  export                            Export a BTRFS subvolume to a DwarFS image
-  import                            Import a DwarFS image into a BTRFS subvolume
-  snapshot                          CoW snapshot of a DwarFS image container
-  promote                           Make a DwarFS-backed path writable
-  demote                            Compress a BTRFS subvolume to DwarFS
-  status                            Show bdfs partition/blend status
-  daemon     start|stop|status      Manage bdfs_daemon
-  check                             Verify host prerequisites
-  help                              Show this help
+  partition    add|remove|list|show   Manage bdfs partitions
+  blend        mount|umount           Manage the BTRFS+DwarFS blend namespace
+  export                              Export a BTRFS subvolume to a DwarFS image
+  import                              Import a DwarFS image into a BTRFS subvolume
+  snapshot                            CoW snapshot of a DwarFS image container
+  promote                             Make a DwarFS-backed path writable
+  demote                              Compress a BTRFS subvolume to DwarFS
+  share                               Expose a blend namespace to a Windows VM via virtiofs
+  unshare                             Remove a blend virtiofs share from a VM
+  list-shares                         List active bdfs virtiofs shares
+  status                              Show bdfs partition/blend status
+  daemon       start|stop|status      Manage bdfs_daemon
+  check                               Verify host prerequisites
+  help                                Show this help
 
 Run 'setup-bdfs.sh <subcommand> --help' for per-subcommand options.
 EOF
@@ -653,16 +833,19 @@ subcmd="${1:-help}"
 shift || true
 
 case "$subcmd" in
-    partition)  cmd_partition "$@" ;;
-    blend)      cmd_blend     "$@" ;;
-    export)     cmd_export    "$@" ;;
-    import)     cmd_import    "$@" ;;
-    snapshot)   cmd_snapshot  "$@" ;;
-    promote)    cmd_promote   "$@" ;;
-    demote)     cmd_demote    "$@" ;;
-    status)     cmd_status    "$@" ;;
-    daemon)     cmd_daemon    "$@" ;;
-    check)      cmd_check     "$@" ;;
+    partition)    cmd_partition   "$@" ;;
+    blend)        cmd_blend       "$@" ;;
+    export)       cmd_export      "$@" ;;
+    import)       cmd_import      "$@" ;;
+    snapshot)     cmd_snapshot    "$@" ;;
+    promote)      cmd_promote     "$@" ;;
+    demote)       cmd_demote      "$@" ;;
+    share)        cmd_share       "$@" ;;
+    unshare)      cmd_unshare     "$@" ;;
+    list-shares)  cmd_list_shares "$@" ;;
+    status)       cmd_status      "$@" ;;
+    daemon)       cmd_daemon      "$@" ;;
+    check)        cmd_check       "$@" ;;
     help|--help|-h) usage ;;
     *) die "Unknown subcommand: $subcmd. Run 'setup-bdfs.sh help' for usage." ;;
 esac
