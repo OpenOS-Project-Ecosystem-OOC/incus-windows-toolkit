@@ -547,6 +547,9 @@ cmd_vm() {
         monitor)
             exec "$IWT_ROOT/cli/monitor.sh" "$@"
             ;;
+        upgrade)
+            cmd_vm_upgrade "$@"
+            ;;
         harden)
             exec "$IWT_ROOT/security/harden-vm.sh" "$@"
             ;;
@@ -575,6 +578,7 @@ Subcommands:
   import <path>       Import VM from backup or image
   first-boot [opts]   Run first-boot PowerShell scripts in a VM
   monitor <action>    VM resource monitoring and stats
+  upgrade [opts]      Upgrade Windows apps and OS inside a running VM
   harden [opts]       Security hardening (Secure Boot, TPM, isolation)
   security-audit      Run Windows security posture audit inside the VM
   secure-boot         Audit UEFI Secure Boot variables inside the VM
@@ -1456,6 +1460,99 @@ EOF
             exit 1
             ;;
     esac
+}
+
+# ── vm upgrade ───────────────────────────────────────────────────────────────
+
+cmd_vm_upgrade() {
+    # Upgrade Windows apps and OS inside a running VM via winget.
+    #
+    # Usage: iwt vm upgrade [--vm NAME] [--list] [--os] [--no-snapshot]
+    #
+    # Options:
+    #   --vm NAME        Incus VM name (default: $IWT_VM_NAME)
+    #   --list           List available upgrades without installing
+    #   --os             Also run Windows Update (requires PSWindowsUpdate module)
+    #   --no-snapshot    Skip the pre-upgrade snapshot
+    #   --help           Show this help
+
+    local vm_name="${IWT_VM_NAME:-windows}" list_only=0 do_os=0 no_snapshot=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --vm)          vm_name="$2"; shift 2 ;;
+            --list)        list_only=1;  shift ;;
+            --os)          do_os=1;      shift ;;
+            --no-snapshot) no_snapshot=1; shift ;;
+            --help|-h)
+                cat <<EOF
+iwt vm upgrade — upgrade Windows apps and OS inside a running VM
+
+Usage: iwt vm upgrade [options]
+
+Options:
+  --vm NAME        Incus VM name (default: \$IWT_VM_NAME or 'windows')
+  --list           List available upgrades without installing
+  --os             Also run Windows Update via PSWindowsUpdate
+  --no-snapshot    Skip the pre-upgrade snapshot (not recommended)
+
+Examples:
+  iwt vm upgrade
+  iwt vm upgrade --vm win11 --list
+  iwt vm upgrade --vm win11 --os
+EOF
+                return 0 ;;
+            *) die "Unknown option: $1. Run: iwt vm upgrade --help" ;;
+        esac
+    done
+
+    source "$IWT_ROOT/remoteapp/backend/incus-backend.sh"
+    IWT_VM_NAME="$vm_name"
+
+    if ! vm_exists; then
+        die "VM '$vm_name' does not exist"
+    fi
+    if ! vm_is_running; then
+        die "VM '$vm_name' is not running. Start it first: iwt vm start $vm_name"
+    fi
+
+    if [[ "$list_only" -eq 1 ]]; then
+        info "Checking for available upgrades in '$vm_name'..."
+        incus exec "$vm_name" -- powershell.exe -NonInteractive -Command \
+            'winget upgrade 2>&1' \
+            || die "winget upgrade list failed (is Windows booted?)"
+        return 0
+    fi
+
+    # Pre-upgrade snapshot
+    if [[ "$no_snapshot" -eq 0 ]]; then
+        local snap_name
+        snap_name="pre-upgrade-$(date +%Y%m%d-%H%M%S)"
+        info "Creating pre-upgrade snapshot: $snap_name"
+        incus snapshot create "$vm_name" "$snap_name" \
+            && ok "Snapshot created: $snap_name" \
+            || warn "Snapshot failed — continuing without it"
+    fi
+
+    # Upgrade all apps via winget
+    info "Upgrading all apps in '$vm_name' via winget..."
+    incus exec "$vm_name" -- powershell.exe -NonInteractive -Command \
+        'winget upgrade --all --accept-source-agreements --accept-package-agreements 2>&1' \
+        || die "winget upgrade --all failed"
+    ok "App upgrades complete in '$vm_name'"
+
+    # Optional: Windows Update via PSWindowsUpdate
+    if [[ "$do_os" -eq 1 ]]; then
+        info "Running Windows Update in '$vm_name' (requires PSWindowsUpdate module)..."
+        incus exec "$vm_name" -- powershell.exe -NonInteractive -Command \
+            'if (-not (Get-Module -ListAvailable PSWindowsUpdate)) {
+                Install-Module PSWindowsUpdate -Force -Scope CurrentUser
+            }
+            Import-Module PSWindowsUpdate
+            Get-WindowsUpdate -Install -AcceptAll -AutoReboot 2>&1' \
+            || warn "Windows Update failed or requires a reboot to complete"
+        ok "Windows Update initiated in '$vm_name'"
+    fi
 }
 
 cmd_vm_net() {
